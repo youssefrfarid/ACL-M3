@@ -413,12 +413,266 @@ def run_baseline_retrieval(intent: str, entities: QueryEntities) -> Dict[str, An
     return result
 
 
+# EMBEDDING-BASED RETRIEVAL
+
+def build_player_feature_descriptions(session) -> List[Dict[str, Any]]:
+    """
+    Build textual feature descriptions for all players based on stats.
+    This implements Feature Vector Embeddings approach.
+    
+    Returns:
+        List of dicts with 'name', 'position', 'description' keys
+    """
+    result = session.run(
+        """
+        MATCH (p:Player)-[r:PLAYED_IN]->(f:Fixture)
+        MATCH (p)-[:PLAYS_AS]->(pos:Position)
+        WITH p, pos,
+             SUM(r.total_points) AS total_points,
+             SUM(r.goals_scored) AS goals,
+             SUM(r.assists) AS assists,
+             SUM(r.minutes) AS minutes,
+             SUM(r.clean_sheets) AS clean_sheets,
+             AVG(r.form) AS form
+        RETURN p.player_name AS name,
+               pos.name AS position,
+               total_points,
+               goals,
+               assists,
+               minutes,
+               clean_sheets,
+               form
+        """
+    )
+
+    players = []
+    for rec in result:
+        # Build rich textual description
+        form_value = rec['form'] if rec['form'] is not None else 0.0
+        desc = (
+            f"Player: {rec['name']}, "
+            f"Position: {rec['position']}, "
+            f"Total points: {rec['total_points']}, "
+            f"Goals: {rec['goals']}, "
+            f"Assists: {rec['assists']}, "
+            f"Minutes: {rec['minutes']}, "
+            f"Clean sheets: {rec['clean_sheets']}, "
+            f"Form: {form_value:.2f}"
+        )
+        players.append({
+            "name": rec["name"],
+            "position": rec["position"],
+            "description": desc,
+        })
+    
+    return players
+
+
+def build_and_store_player_embeddings(
+    model_name: str,
+    index_name: str = "player_embedding_index",
+) -> None:
+    """
+    Build feature-based embeddings for all players and store them in Neo4j.
+    Also creates a vector index on :Player(embedding) for similarity search.
+    
+    This implements the 'Feature Vector Embeddings' option for FPL.
+    
+    Args:
+        model_name: SentenceTransformer model name (e.g., 'sentence-transformers/all-MiniLM-L6-v2')
+        index_name: Name for the vector index
+    
+    Example:
+        build_and_store_player_embeddings(
+            "sentence-transformers/all-MiniLM-L6-v2",
+            "player_embedding_index_minilm"
+        )
+    """
+    from sentence_transformers import SentenceTransformer
+    
+    print(f"\nBuilding embeddings with model: {model_name}")
+    print(f"Index name: {index_name}")
+    
+    model = SentenceTransformer(model_name)
+    dim = model.get_sentence_embedding_dimension()
+    print(f"Embedding dimension: {dim}")
+
+    with get_driver().session() as session:
+        # Step 1: Build feature descriptions
+        print("\nStep 1: Building player feature descriptions...")
+        players = build_player_feature_descriptions(session)
+        print(f"Built descriptions for {len(players)} players")
+
+        # Step 2: Store embeddings on Player nodes
+        print("\nStep 2: Computing and storing embeddings...")
+        for i, p in enumerate(players):
+            if i % 100 == 0:
+                print(f"  Processed {i}/{len(players)} players...")
+            
+            emb = model.encode(p["description"], normalize_embeddings=True)
+            emb_list = emb.tolist()
+            
+            session.run(
+                """
+                MATCH (pl:Player {player_name: $name})
+                SET pl.embedding = $emb,
+                    pl.embedding_model = $model_name
+                """,
+                name=p["name"],
+                emb=emb_list,
+                model_name=model_name,
+            )
+        
+        print(f"  Stored embeddings for all {len(players)} players")
+
+        # Step 3: Create vector index
+        print("\nStep 3: Creating vector index...")
+        try:
+            # Drop existing index if it exists with different config
+            session.run(f"DROP INDEX {index_name} IF EXISTS")
+            
+            # Create vector index with correct dimensions
+            session.run(
+                f"""
+                CREATE VECTOR INDEX {index_name}
+                FOR (p:Player) ON (p.embedding)
+                OPTIONS {{
+                  indexConfig: {{
+                    `vector.dimensions`: {dim},
+                    `vector.similarity_function`: 'cosine'
+                  }}
+                }}
+                """
+            )
+            print(f"✓ Created vector index '{index_name}' with {dim} dimensions")
+        except Exception as e:
+            print(f"Note: {e}")
+            print("Index may already exist or require manual creation")
+    
+    print(f"\n✓ Embedding build complete!")
+    print(f"  Model: {model_name}")
+    print(f"  Index: {index_name}")
+    print(f"  Players: {len(players)}")
+
+
+def run_embedding_retrieval(
+    query_embedding: List[float],
+    entities: QueryEntities,
+    index_name: str = "player_embedding_index",
+    top_k: int = 20,
+) -> Dict[str, Any]:
+    """
+    Use Neo4j vector index to find players semantically similar to the query.
+    
+    Args:
+        query_embedding: Normalized embedding vector for the query
+        entities: QueryEntities for optional filtering
+        index_name: Name of the vector index to use
+        top_k: Number of top results to return
+    
+    Returns:
+        Dict with mode='embedding', players list, and metadata
+    """
+    with get_driver().session() as session:
+        # Perform vector similarity search
+        result = session.run(
+            """
+            CALL db.index.vector.queryNodes($index_name, $top_k, $embedding)
+            YIELD node, score
+            MATCH (node)-[:PLAYS_AS]->(pos:Position)
+            RETURN node.player_name AS name,
+                   score,
+                   pos.name AS position,
+                   node.embedding_model AS model
+            """,
+            index_name=index_name,
+            top_k=top_k,
+            embedding=query_embedding,
+        )
+
+        rows = []
+        for rec in result:
+            row = {
+                "name": rec["name"],
+                "score": float(rec["score"]),
+                "position": rec["position"],
+                "model": rec["model"],
+            }
+            rows.append(row)
+        
+        # Optional post-filtering by position
+        if entities.position and rows:
+            rows = [r for r in rows if r["position"] == entities.position]
+        
+        return {
+            "mode": "embedding",
+            "index_name": index_name,
+            "intent": None,  # Can be filled by caller
+            "entities": entities.to_dict(),
+            "players": rows,
+        }
+
+
+def retrieve_hybrid(
+    intent: str,
+    entities: QueryEntities,
+    query_embedding: List[float],
+    index_name: str = "player_embedding_index",
+    top_k: int = 20,
+) -> Dict[str, Any]:
+    """
+    Run both baseline (Cypher) and embedding-based retrieval, 
+    then return a combined context.
+    
+    This allows the LLM layer to use both structured query results
+    and semantic similarity results.
+    
+    Args:
+        intent: Intent from classify_intent()
+        entities: QueryEntities from extract_entities()
+        query_embedding: Embedding vector for the query
+        index_name: Vector index to use
+        top_k: Number of embedding results
+    
+    Returns:
+        Dict containing both baseline and embedding results
+    """
+    # Run baseline retrieval
+    baseline_ctx = run_baseline_retrieval(intent, entities)
+    
+    # Run embedding retrieval
+    embedding_ctx = run_embedding_retrieval(
+        query_embedding, 
+        entities, 
+        index_name=index_name, 
+        top_k=top_k
+    )
+
+    # Combine results
+    return {
+        "mode": "hybrid",
+        "intent": intent,
+        "entities": entities.to_dict(),
+        "baseline_template": baseline_ctx.get("template"),
+        "baseline_players": baseline_ctx.get("players", []),
+        "baseline_fixtures": baseline_ctx.get("fixtures", []),
+        "baseline_teams": baseline_ctx.get("teams", []),
+        "embedding_players": embedding_ctx.get("players", []),
+        "embedding_index": index_name,
+    }
+
+
 
 
 # MANUAL TESTING
 
 if __name__ == "__main__":
-    from input_processing import classify_intent, extract_entities, load_known_players_and_teams
+    from input_processing import (
+        classify_intent, 
+        extract_entities, 
+        load_known_players_and_teams,
+        get_query_embedding
+    )
 
     # Load players and teams from the graph
     print("Loading players and teams from Neo4j...")
@@ -431,40 +685,153 @@ if __name__ == "__main__":
         players = []
         teams = []
 
+    print("\n" + "="*60)
+    print("FPL Graph Retrieval - Interactive Testing")
+    print("="*60)
+    print("\nModes available:")
+    print("  1. Baseline only (default)")
+    print("  2. Embedding only")
+    print("  3. Hybrid (both)")
+    print("\nCommands:")
+    print("  'mode [1|2|3]' - Change retrieval mode")
+    print("  'exit' - Exit program")
+    print("="*60)
+
+    # Default settings
+    retrieval_mode = int(input("Enter retrieval mode (1, 2, or 3): "))  # 1=baseline, 2=embedding, 3=hybrid
+    embedding_index = "player_embedding_index_minilm"  # Matches build_embeddings.py output
+    
     while True:
-        q = input("\nAsk an FPL question (or 'exit'): ")
+        q = input("\nAsk an FPL question: ")
         if q.strip().lower() == "exit":
             break
 
+        # Process queryMode: Hybrid
+Intent: team_recommendation
+Entities: {'player_names': [], 'team_names': [], 'position': 'DEF', 'gameweek': None, 'horizon_gw': None, 'season': None, 'budget': None, 'stat_name': None}
+Baseline Template: team_defensive_strength
+Embedding Index: player_embedding_index_minilm
+
+Embedding Players (top 2):
+  Romain Perraud                 | Pos: DEF | Score: 0.5853
+  Romain Perraud                 | Pos: DEF | Score: 0.5853
+============================================================
+
+Ask an FPL question: best 6 teams                                                                     
+
+============================================================
+Mode: Hybrid
+Intent: team_recommendation
+Entities: {'player_names': [], 'team_names': [], 'position': None, 'gameweek': None, 'horizon_gw': None, 'season': None, 'budget': None, 'stat_name': None}
+Baseline Template: team_defensive_strength
+Embedding Index: player_embedding_index_minilm
+
+Embedding Players (top 10):
+  Miguel Almirón Rejala          | Pos: MID | Score: 0.5792
+  Raheem Sterling                | Pos: MID | Score: 0.5782
+  Raheem Sterling                | Pos: MID | Score: 0.5782
+  Jürgen Locadia                 | Pos: FWD | Score: 0.5771
+  Juan Camilo Hernández Suárez   | Pos: FWD | Score: 0.5756
+  Toti António Gomes             | Pos: DEF | Score: 0.5748
+  Toti António Gomes             | Pos: DEF | Score: 0.5748
+  Tomas Soucek                   | Pos: MID | Score: 0.5747
+  Tomas Soucek                   | Pos: MID | Score: 0.5747
+  Miguel Almirón                 | Pos: MID | Score: 0.5743
+============================================================
+
         intent = classify_intent(q)
         entities = extract_entities(q, players, teams)
-
-        ctx = run_baseline_retrieval(intent, entities)
         
         print("\n" + "="*60)
-        print("Intent:", ctx["intent"])
-        print("Entities:", ctx["entities"])
-        print("Template:", ctx["template"])
-        print("Mode:", ctx["mode"])
+        print(f"Mode: {['', 'Baseline', 'Embedding', 'Hybrid'][retrieval_mode]}")
+        print(f"Intent: {intent}")
+        print(f"Entities: {entities.to_dict()}")
         
-        # Display sample results
-        players_result = ctx.get("players", [])
-        fixtures_result = ctx.get("fixtures", [])
-        teams_result = ctx.get("teams", [])
+        # Mode 1: Baseline only
+        if retrieval_mode == 1:
+            ctx = run_baseline_retrieval(intent, entities)
+            print(f"Template: {ctx.get('template')}")
+            
+            players_result = ctx.get("players", [])
+            fixtures_result = ctx.get("fixtures", [])
+            teams_result = ctx.get("teams", [])
+            
+            if players_result:
+                print(f"\nBaseline Players (showing first 3 of {len(players_result)}):")
+                for p in players_result[:3]:
+                    print(f"  {p}")
+            
+            if fixtures_result:
+                print(f"\nFixtures (showing first 3 of {len(fixtures_result)}):")
+                for f in fixtures_result[:3]:
+                    print(f"  {f}")
+            
+            if teams_result:
+                print(f"\nTeams (showing first 3 of {len(teams_result)}):")
+                for t in teams_result[:3]:
+                    print(f"  {t}")
         
-        if players_result:
-            print(f"\nPlayers (showing first 3 of {len(players_result)}):")
-            for p in players_result[:3]:
-                print(f"  {p}")
+        # Mode 2: Embedding only
+        elif retrieval_mode == 2:
+            query_emb = get_query_embedding(q)
+            ctx = run_embedding_retrieval(
+                query_emb, 
+                entities, 
+                index_name=embedding_index, 
+                top_k=10
+            )
+            print(f"Index: {ctx.get('index_name')}")
+            
+            emb_players = ctx.get("players", [])
+            if emb_players:
+                print(f"\nEmbedding Players (top {len(emb_players)}):")
+                for p in emb_players:
+                    print(f"  {p['name']:30s} | Pos: {p['position']:3s} | Score: {p['score']:.4f}")
+            else:
+                print("\nNo embedding results found")
+                print("Hint: Run build_and_store_player_embeddings() first")
         
-        if fixtures_result:
-            print(f"\nFixtures (showing first 3 of {len(fixtures_result)}):")
-            for f in fixtures_result[:3]:
-                print(f"  {f}")
-        
-        if teams_result:
-            print(f"\nTeams (showing first 3 of {len(teams_result)}):")
-            for t in teams_result[:3]:
-                print(f"  {t}")
+        # Mode 3: Hybrid
+        elif retrieval_mode == 3:
+            query_emb = get_query_embedding(q)
+            ctx = retrieve_hybrid(
+                intent, 
+                entities, 
+                query_emb, 
+                index_name=embedding_index, 
+                top_k=10
+            )
+            print(f"Baseline Template: {ctx.get('baseline_template')}")
+            print(f"Embedding Index: {ctx.get('embedding_index')}")
+            
+            # Show baseline results (players, fixtures, or teams)
+            base_players = ctx.get("baseline_players", [])
+            base_fixtures = ctx.get("baseline_fixtures", [])
+            base_teams = ctx.get("baseline_teams", [])
+            
+            if base_players:
+                print(f"\nBaseline Players (first 3 of {len(base_players)}):")
+                for p in base_players[:3]:
+                    print(f"  {p}")
+            
+            if base_fixtures:
+                print(f"\nBaseline Fixtures (first 3 of {len(base_fixtures)}):")
+                for f in base_fixtures[:3]:
+                    print(f"  {f}")
+            
+            if base_teams:
+                print(f"\nBaseline Teams (first 3 of {len(base_teams)}):")
+                for t in base_teams[:3]:
+                    print(f"  {t}")
+            
+            # Show embedding results
+            emb_players = ctx.get("embedding_players", [])
+            if emb_players:
+                print(f"\nEmbedding Players (top {len(emb_players)}):")
+                for p in emb_players:
+                    print(f"  {p['name']:30s} | Pos: {p['position']:3s} | Score: {p['score']:.4f}")
+            else:
+                print("\nNo embedding results")
+                print("Hint: Run build_and_store_player_embeddings() first")
         
         print("="*60)

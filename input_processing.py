@@ -123,13 +123,18 @@ def classify_intent(question: str) -> str:
     # 3) Fixtures
     if "fixture" in q or "fixtures" in q or ("who do" in q and "play" in q):
         return INTENT_FIXTURE_INFO
+    
+    # 4) Team queries (best teams, top teams, etc.)
+    if ("team" in q or "teams" in q) and not any(word in q for word in ["player", "players"]):
+        if any(word in q for word in ["best", "top", "good", "strong", "weak", "defence", "defense", "attack"]):
+            return INTENT_TEAM_RECOMMEND
 
-    # 4) Player stats/info
+    # 5) Player stats/info
     stats_keywords = ["points", "stats", "goals", "assists", "xg", "xa", "form"]
     if any(word in q for word in stats_keywords):
         return INTENT_PLAYER_INFO
 
-    # 5) Fallback
+    # 6) Fallback
     return INTENT_GENERAL_QUESTION
 
 
