@@ -206,25 +206,45 @@ def q_team_defensive_strength(session, entities: QueryEntities) -> Dict[str, Any
     """
     T6 – Team defensive strength (goals conceded)
     Returns teams ranked by defensive strength (lowest goals conceded).
+    If no season specified, aggregates across all seasons.
     """
-    season = entities.season or "2023-24"
+    season = entities.season
     limit = 20
 
-    result = session.run(
-        """
-        MATCH (t:Team)
-        MATCH (f:Fixture {season: $season})
-        MATCH (p:Player)-[r:PLAYED_IN]->(f)
-        WHERE (f)-[:HAS_HOME_TEAM]->(t) OR (f)-[:HAS_AWAY_TEAM]->(t)
-        WITH t, SUM(r.goals_conceded) AS goals_conceded
-        RETURN t.name AS team,
-               goals_conceded
-        ORDER BY goals_conceded ASC
-        LIMIT $limit
-        """,
-        season=season,
-        limit=limit,
-    )
+    if season:
+        # Filter by specific season
+        result = session.run(
+            """
+            MATCH (t:Team)
+            MATCH (f:Fixture {season: $season})
+            MATCH (p:Player)-[r:PLAYED_IN]->(f)
+            WHERE (f)-[:HAS_HOME_TEAM]->(t) OR (f)-[:HAS_AWAY_TEAM]->(t)
+            WITH t, SUM(r.goals_conceded) AS goals_conceded
+            RETURN t.name AS team,
+                   goals_conceded
+            ORDER BY goals_conceded ASC
+            LIMIT $limit
+            """,
+            season=season,
+            limit=limit,
+        )
+    else:
+        # Aggregate across all seasons
+        result = session.run(
+            """
+            MATCH (t:Team)
+            MATCH (f:Fixture)
+            MATCH (p:Player)-[r:PLAYED_IN]->(f)
+            WHERE (f)-[:HAS_HOME_TEAM]->(t) OR (f)-[:HAS_AWAY_TEAM]->(t)
+            WITH t, SUM(r.goals_conceded) AS goals_conceded
+            RETURN t.name AS team,
+                   goals_conceded
+            ORDER BY goals_conceded ASC
+            LIMIT $limit
+            """,
+            limit=limit,
+        )
+
     rows = [rec.data() for rec in result]
     return {"template": "team_defensive_strength", "teams": rows}
 
@@ -355,55 +375,53 @@ def run_baseline_retrieval(intent: str, entities: QueryEntities) -> Dict[str, An
     """
     Router function that selects the appropriate Cypher query template
     based on the intent and QueryEntities.
-    
-    Args:
-        intent: Intent string from classify_intent()
-        entities: QueryEntities object from extract_entities()
-    
-    Returns:
-        Dict containing:
-            - template: name of the template used
-            - players/fixtures/teams: list of result dicts
-            - mode: "baseline"
-            - intent: original intent
-            - entities: serialized QueryEntities
     """
     with get_driver().session() as session:
+        # Case 1: Player Info / Stats
         if intent == INTENT_PLAYER_INFO:
-            # Smart routing based on what info we have
-            if entities.gameweek is not None or entities.horizon_gw is not None:
-                # User asked about specific gameweeks - use recent form
+            if entities.stat_name:
+                # Specific stat requested -> leaderboard
+                result = q_leaderboard_by_stat(session, entities)
+            elif entities.gameweek is not None or entities.horizon_gw is not None:
+                # Specific gameweeks -> recent form
                 result = q_player_recent_form(session, entities)
             elif entities.player_names:
-                # Specific player mentioned - use season summary
+                # Specific player -> season summary
                 result = q_player_season_summary(session, entities)
             else:
-                # No specific player - fallback to top scorers
+                # Fallback -> top scorers
                 result = q_top_scorers_overall(session, entities)
 
+        # Case 2: Compare Players
         elif intent == INTENT_COMPARE_PLAYERS:
             result = q_compare_two_players(session, entities)
 
+        # Case 3: Fixtures
         elif intent == INTENT_FIXTURE_INFO:
             result = q_team_fixtures_range(session, entities)
 
+        # Case 4: Player Recommendation
         elif intent == INTENT_PLAYER_RECOMMEND:
-            # Use recent form for recommendations
             result = q_top_players_recent_form_position(session, entities)
 
+        # Case 5: Team Recommendation
         elif intent == INTENT_TEAM_RECOMMEND:
-            result = q_team_defensive_strength(session, entities)
-
-        else:  # INTENT_GENERAL_QUESTION or unsupported intents
-            # Smart routing for general questions
+            # If position specified, treat as player recommendation for that team context
             if entities.position:
-                # Position specified - use position-based leaderboard
+                result = q_top_players_recent_form_position(session, entities)
+            else:
+                result = q_team_defensive_strength(session, entities)
+
+        # Case 6: General Question / Fallback
+        else:
+            if entities.position:
+                # Position specified -> position-based leaderboard
                 result = q_top_players_by_position(session, entities)
             elif entities.stat_name:
-                # Specific stat requested - use stat leaderboard
+                # Specific stat -> leaderboard
                 result = q_leaderboard_by_stat(session, entities)
             else:
-                # Generic question - top scorers overall
+                # Fallback -> top scorers overall
                 result = q_top_scorers_overall(session, entities)
 
     # Wrap with metadata for the LLM layer
@@ -415,13 +433,12 @@ def run_baseline_retrieval(intent: str, entities: QueryEntities) -> Dict[str, An
 
 # EMBEDDING-BASED RETRIEVAL
 
+
 def build_player_feature_descriptions(session) -> List[Dict[str, Any]]:
     """
     Build textual feature descriptions for all players based on stats.
     This implements Feature Vector Embeddings approach.
-    
-    Returns:
-        List of dicts with 'name', 'position', 'description' keys
+    Enriched with more nuanced signals like attacking contribution and cards.
     """
     result = session.run(
         """
@@ -433,7 +450,14 @@ def build_player_feature_descriptions(session) -> List[Dict[str, Any]]:
              SUM(r.assists) AS assists,
              SUM(r.minutes) AS minutes,
              SUM(r.clean_sheets) AS clean_sheets,
-             AVG(r.form) AS form
+             SUM(r.penalties_scored) AS penalties_scored,
+             SUM(r.penalties_missed) AS penalties_missed,
+             SUM(r.yellow_cards) AS yellow_cards,
+             SUM(r.red_cards) AS red_cards,
+             AVG(r.form) AS form,
+             AVG(r.creativity) AS creativity,
+             AVG(r.threat) AS threat,
+             AVG(r.ict_index) AS ict_index
         RETURN p.player_name AS name,
                pos.name AS position,
                total_points,
@@ -441,23 +465,63 @@ def build_player_feature_descriptions(session) -> List[Dict[str, Any]]:
                assists,
                minutes,
                clean_sheets,
-               form
+               penalties_scored,
+               penalties_missed,
+               yellow_cards,
+               red_cards,
+               form,
+               creativity,
+               threat,
+               ict_index
         """
     )
 
     players = []
     for rec in result:
+        # Calculate derived metrics
+        minutes = rec['minutes'] if rec['minutes'] else 1
+        goals = rec['goals'] if rec['goals'] else 0
+        assists = rec['assists'] if rec['assists'] else 0
+        
+        # Attacking contribution (goals + assists per 90)
+        per_90_factor = 90.0 / max(1.0, float(minutes))
+        attacking_contrib_val = (goals + assists) * per_90_factor
+        
+        if attacking_contrib_val > 0.6:
+            attacking_text = "High attacking contribution"
+        elif attacking_contrib_val > 0.3:
+            attacking_text = "Moderate attacking contribution"
+        else:
+            attacking_text = "Low attacking contribution"
+
+        # Optional fields
+        penalties_text = ""
+        if rec['penalties_scored'] and rec['penalties_scored'] > 0:
+            penalties_text = f", Penalties scored: {rec['penalties_scored']}"
+            
+        cards_text = ""
+        if (rec['yellow_cards'] and rec['yellow_cards'] > 0) or (rec['red_cards'] and rec['red_cards'] > 0):
+            yc = rec['yellow_cards'] if rec['yellow_cards'] else 0
+            rc = rec['red_cards'] if rec['red_cards'] else 0
+            cards_text = f", Cards: {yc}Y/{rc}R"
+
+        form_val = rec['form'] if rec['form'] is not None else 0.0
+        ict_val = rec['ict_index'] if rec['ict_index'] is not None else 0.0
+        
         # Build rich textual description
-        form_value = rec['form'] if rec['form'] is not None else 0.0
         desc = (
             f"Player: {rec['name']}, "
             f"Position: {rec['position']}, "
             f"Total points: {rec['total_points']}, "
-            f"Goals: {rec['goals']}, "
-            f"Assists: {rec['assists']}, "
-            f"Minutes: {rec['minutes']}, "
+            f"Goals: {goals}, "
+            f"Assists: {assists}, "
+            f"Minutes: {minutes}, "
             f"Clean sheets: {rec['clean_sheets']}, "
-            f"Form: {form_value:.2f}"
+            f"Form: {form_val:.2f}, "
+            f"ICT: {ict_val:.2f}, "
+            f"Attacking: {attacking_text}"
+            f"{penalties_text}"
+            f"{cards_text}"
         )
         players.append({
             "name": rec["name"],
@@ -563,6 +627,7 @@ def run_embedding_retrieval(
 ) -> Dict[str, Any]:
     """
     Use Neo4j vector index to find players semantically similar to the query.
+    Performs post-filtering and deduplication.
     
     Args:
         query_embedding: Normalized embedding vector for the query
@@ -574,7 +639,9 @@ def run_embedding_retrieval(
         Dict with mode='embedding', players list, and metadata
     """
     with get_driver().session() as session:
-        # Perform vector similarity search
+        # Fetch more candidates to allow for post-filtering
+        fetch_k = top_k * 3
+        
         result = session.run(
             """
             CALL db.index.vector.queryNodes($index_name, $top_k, $embedding)
@@ -586,31 +653,55 @@ def run_embedding_retrieval(
                    node.embedding_model AS model
             """,
             index_name=index_name,
-            top_k=top_k,
+            top_k=fetch_k,
             embedding=query_embedding,
         )
 
-        rows = []
+        raw_players = []
         for rec in result:
-            row = {
+            raw_players.append({
                 "name": rec["name"],
                 "score": float(rec["score"]),
                 "position": rec["position"],
+                "team": None,  # Team not directly available in this schema
                 "model": rec["model"],
-            }
-            rows.append(row)
+            })
+
+    # Post-processing: Deduplicate and Filter
+    seen_names = set()
+    cleaned_players = []
+    
+    target_pos = entities.position
+    # If explicit team names provided, filter by them
+    target_teams = set([t.lower() for t in entities.team_names]) if entities.team_names else None
+
+    for p in raw_players:
+        # Deduplicate
+        if p["name"] in seen_names:
+            continue
         
-        # Optional post-filtering by position
-        if entities.position and rows:
-            rows = [r for r in rows if r["position"] == entities.position]
+        # Filter by Position
+        if target_pos and p["position"] != target_pos:
+            continue
+            
+        # Filter by Team (simple case-insensitive check)
+        if target_teams:
+            if not p["team"] or p["team"].lower() not in target_teams:
+                continue
+            
+        seen_names.add(p["name"])
+        cleaned_players.append(p)
         
-        return {
-            "mode": "embedding",
-            "index_name": index_name,
-            "intent": None,  # Can be filled by caller
-            "entities": entities.to_dict(),
-            "players": rows,
-        }
+        if len(cleaned_players) >= top_k:
+            break
+
+    return {
+        "mode": "embedding",
+        "index_name": index_name,
+        "intent": None,
+        "entities": entities.to_dict(),
+        "players": cleaned_players,
+    }
 
 
 def retrieve_hybrid(
@@ -618,47 +709,49 @@ def retrieve_hybrid(
     entities: QueryEntities,
     query_embedding: List[float],
     index_name: str = "player_embedding_index",
-    top_k: int = 20,
+    top_k: int = 10,
 ) -> Dict[str, Any]:
     """
-    Run both baseline (Cypher) and embedding-based retrieval, 
-    then return a combined context.
-    
-    This allows the LLM layer to use both structured query results
-    and semantic similarity results.
-    
-    Args:
-        intent: Intent from classify_intent()
-        entities: QueryEntities from extract_entities()
-        query_embedding: Embedding vector for the query
-        index_name: Vector index to use
-        top_k: Number of embedding results
-    
-    Returns:
-        Dict containing both baseline and embedding results
+    Orchestrate both baseline and embedding retrieval.
+    Returns a unified result with summary metadata.
     """
-    # Run baseline retrieval
+    # 1. Baseline
     baseline_ctx = run_baseline_retrieval(intent, entities)
     
-    # Run embedding retrieval
-    embedding_ctx = run_embedding_retrieval(
-        query_embedding, 
-        entities, 
-        index_name=index_name, 
-        top_k=top_k
-    )
-
-    # Combine results
+    # 2. Embedding
+    embedding_ctx = run_embedding_retrieval(query_embedding, entities, index_name, top_k)
+    
+    # 3. Combine
+    baseline_players = baseline_ctx.get("players", [])
+    baseline_fixtures = baseline_ctx.get("fixtures", [])
+    baseline_teams = baseline_ctx.get("teams", [])
+    embedding_players = embedding_ctx.get("players", [])
+    
     return {
         "mode": "hybrid",
         "intent": intent,
         "entities": entities.to_dict(),
-        "baseline_template": baseline_ctx.get("template"),
-        "baseline_players": baseline_ctx.get("players", []),
-        "baseline_fixtures": baseline_ctx.get("fixtures", []),
-        "baseline_teams": baseline_ctx.get("teams", []),
-        "embedding_players": embedding_ctx.get("players", []),
-        "embedding_index": index_name,
+        
+        "baseline_players": baseline_players,
+        "baseline_fixtures": baseline_fixtures,
+        "baseline_teams": baseline_teams,
+        
+        "embedding_players": embedding_players,
+        
+        "summary": {
+            "baseline_player_count": len(baseline_players),
+            "baseline_fixture_count": len(baseline_fixtures),
+            "baseline_team_count": len(baseline_teams),
+            "embedding_player_count": len(embedding_players),
+            "templates_used": {
+                "baseline": baseline_ctx.get("template"),
+                "embedding_index": index_name,
+            },
+        },
+        
+        # Retain raw contexts if needed for deeper inspection
+        "baseline_context": baseline_ctx,
+        "embedding_context": embedding_ctx,
     }
 
 
@@ -706,39 +799,7 @@ if __name__ == "__main__":
         if q.strip().lower() == "exit":
             break
 
-        # Process queryMode: Hybrid
-Intent: team_recommendation
-Entities: {'player_names': [], 'team_names': [], 'position': 'DEF', 'gameweek': None, 'horizon_gw': None, 'season': None, 'budget': None, 'stat_name': None}
-Baseline Template: team_defensive_strength
-Embedding Index: player_embedding_index_minilm
-
-Embedding Players (top 2):
-  Romain Perraud                 | Pos: DEF | Score: 0.5853
-  Romain Perraud                 | Pos: DEF | Score: 0.5853
-============================================================
-
-Ask an FPL question: best 6 teams                                                                     
-
-============================================================
-Mode: Hybrid
-Intent: team_recommendation
-Entities: {'player_names': [], 'team_names': [], 'position': None, 'gameweek': None, 'horizon_gw': None, 'season': None, 'budget': None, 'stat_name': None}
-Baseline Template: team_defensive_strength
-Embedding Index: player_embedding_index_minilm
-
-Embedding Players (top 10):
-  Miguel Almirón Rejala          | Pos: MID | Score: 0.5792
-  Raheem Sterling                | Pos: MID | Score: 0.5782
-  Raheem Sterling                | Pos: MID | Score: 0.5782
-  Jürgen Locadia                 | Pos: FWD | Score: 0.5771
-  Juan Camilo Hernández Suárez   | Pos: FWD | Score: 0.5756
-  Toti António Gomes             | Pos: DEF | Score: 0.5748
-  Toti António Gomes             | Pos: DEF | Score: 0.5748
-  Tomas Soucek                   | Pos: MID | Score: 0.5747
-  Tomas Soucek                   | Pos: MID | Score: 0.5747
-  Miguel Almirón                 | Pos: MID | Score: 0.5743
-============================================================
-
+        # Process query
         intent = classify_intent(q)
         entities = extract_entities(q, players, teams)
         
@@ -784,7 +845,7 @@ Embedding Players (top 10):
             
             emb_players = ctx.get("players", [])
             if emb_players:
-                print(f"\nEmbedding Players (top {len(emb_players)}):")
+                print(f"\nEmbedding Players (deduplicated, top {len(emb_players)}):")
                 for p in emb_players:
                     print(f"  {p['name']:30s} | Pos: {p['position']:3s} | Score: {p['score']:.4f}")
             else:
@@ -801,8 +862,13 @@ Embedding Players (top 10):
                 index_name=embedding_index, 
                 top_k=10
             )
-            print(f"Baseline Template: {ctx.get('baseline_template')}")
-            print(f"Embedding Index: {ctx.get('embedding_index')}")
+            
+            summary = ctx.get("summary", {})
+            print(f"\nSummary:")
+            print(f"  Baseline: {summary.get('baseline_player_count', 0)} players, "
+                  f"{summary.get('baseline_team_count', 0)} teams")
+            print(f"  Embedding: {summary.get('embedding_player_count', 0)} players")
+            print(f"  Templates: {summary.get('templates_used', {})}")
             
             # Show baseline results (players, fixtures, or teams)
             base_players = ctx.get("baseline_players", [])
@@ -810,17 +876,17 @@ Embedding Players (top 10):
             base_teams = ctx.get("baseline_teams", [])
             
             if base_players:
-                print(f"\nBaseline Players (first 3 of {len(base_players)}):")
+                print(f"\nBaseline Players (first 3):")
                 for p in base_players[:3]:
                     print(f"  {p}")
             
             if base_fixtures:
-                print(f"\nBaseline Fixtures (first 3 of {len(base_fixtures)}):")
+                print(f"\nBaseline Fixtures (first 3):")
                 for f in base_fixtures[:3]:
                     print(f"  {f}")
             
             if base_teams:
-                print(f"\nBaseline Teams (first 3 of {len(base_teams)}):")
+                print(f"\nBaseline Teams (first 3):")
                 for t in base_teams[:3]:
                     print(f"  {t}")
             
@@ -832,6 +898,5 @@ Embedding Players (top 10):
                     print(f"  {p['name']:30s} | Pos: {p['position']:3s} | Score: {p['score']:.4f}")
             else:
                 print("\nNo embedding results")
-                print("Hint: Run build_and_store_player_embeddings() first")
         
         print("="*60)
