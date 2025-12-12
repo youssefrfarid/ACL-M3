@@ -1,6 +1,6 @@
 
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from neo4j import GraphDatabase
 from input_processing import (
     QueryEntities,
@@ -535,6 +535,8 @@ def build_player_feature_descriptions(session) -> List[Dict[str, Any]]:
 def build_and_store_player_embeddings(
     model_name: str,
     index_name: str = "player_embedding_index",
+    use_cloud: bool = True,
+    hf_token: Optional[str] = None,
 ) -> None:
     """
     Build feature-based embeddings for all players and store them in Neo4j.
@@ -545,21 +547,70 @@ def build_and_store_player_embeddings(
     Args:
         model_name: SentenceTransformer model name (e.g., 'sentence-transformers/all-MiniLM-L6-v2')
         index_name: Name for the vector index
+        use_cloud: If True, use HuggingFace API (M1 compatible). If False, use local model.
+        hf_token: HuggingFace API token (required if use_cloud=True)
     
     Example:
+        # Cloud mode (M1 compatible)
         build_and_store_player_embeddings(
             "sentence-transformers/all-MiniLM-L6-v2",
-            "player_embedding_index_minilm"
+            "player_embedding_index_minilm",
+            use_cloud=True,
+            hf_token="your_token_here"
+        )
+        
+        # Local mode (may cause M1 issues)
+        build_and_store_player_embeddings(
+            "sentence-transformers/all-MiniLM-L6-v2",
+            "player_embedding_index_minilm",
+            use_cloud=False
         )
     """
-    from sentence_transformers import SentenceTransformer
-    
     print(f"\nBuilding embeddings with model: {model_name}")
     print(f"Index name: {index_name}")
+    print(f"Mode: {'Cloud API (M1 compatible)' if use_cloud else 'Local model'}")
     
-    model = SentenceTransformer(model_name)
-    dim = model.get_sentence_embedding_dimension()
-    print(f"Embedding dimension: {dim}")
+    if use_cloud:
+        # Cloud mode - use HuggingFace API
+        from huggingface_hub import InferenceClient
+        import numpy as np
+        
+        if not hf_token:
+            # Try loading from file
+            from input_processing import load_hf_token
+            hf_token = load_hf_token()
+            if not hf_token:
+                raise ValueError(
+                    "Cloud mode requires HuggingFace token. "
+                    "Either pass hf_token parameter or create hf.txt file."
+                )
+        
+        client = InferenceClient(token=hf_token)
+        dim = 384  # Standard dimension for all-MiniLM-L6-v2
+        print(f"Embedding dimension: {dim}")
+        
+        def encode_text(text: str) -> List[float]:
+            """Encode text using HuggingFace API"""
+            response = client.feature_extraction(text, model=model_name)
+            embedding = np.array(response)
+            if len(embedding.shape) == 2:
+                embedding = np.mean(embedding, axis=0)
+            # Normalize
+            embedding = embedding / np.linalg.norm(embedding)
+            return embedding.tolist()
+    else:
+        # Local mode - use SentenceTransformer
+        from sentence_transformers import SentenceTransformer
+        
+        print("WARNING: Local mode may cause OpenMP lock issues on M1 Macs")
+        model = SentenceTransformer(model_name)
+        dim = model.get_sentence_embedding_dimension()
+        print(f"Embedding dimension: {dim}")
+        
+        def encode_text(text: str) -> List[float]:
+            """Encode text using local model"""
+            emb = model.encode(text, normalize_embeddings=True)
+            return emb.tolist()
 
     with get_driver().session() as session:
         # Step 1: Build feature descriptions
@@ -573,8 +624,7 @@ def build_and_store_player_embeddings(
             if i % 100 == 0:
                 print(f"  Processed {i}/{len(players)} players...")
             
-            emb = model.encode(p["description"], normalize_embeddings=True)
-            emb_list = emb.tolist()
+            emb_list = encode_text(p["description"])
             
             session.run(
                 """
@@ -615,6 +665,7 @@ def build_and_store_player_embeddings(
     
     print(f"\n✓ Embedding build complete!")
     print(f"  Model: {model_name}")
+    print(f"  Mode: {'Cloud API' if use_cloud else 'Local'}")
     print(f"  Index: {index_name}")
     print(f"  Players: {len(players)}")
 

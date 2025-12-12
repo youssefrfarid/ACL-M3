@@ -3,7 +3,7 @@ from typing import Optional, List, Dict, Tuple
 import re
 
 from neo4j import GraphDatabase
-from sentence_transformers import SentenceTransformer
+# NOTE: SentenceTransformer import moved to get_embedding_model() to avoid M1 lock issues
 
 
 # =====================  CONFIG / NEO4J CONNECTION  =====================
@@ -78,24 +78,88 @@ class QueryEntities:
 # =====================  EMBEDDING MODEL  =====================
 
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-_embedding_model: Optional[SentenceTransformer] = None
+_embedding_model = None  # Lazy-loaded to avoid M1 lock issues
+USE_CLOUD_EMBEDDINGS = True  # Set to False to use local model (may cause M1 issues)
 
 
-def get_embedding_model() -> SentenceTransformer:
+def load_hf_token(token_file: str = "hf.txt") -> Optional[str]:
+    """
+    Load HuggingFace API token from file.
+    Required for cloud-based embeddings (M1 Mac compatible).
+    
+    Returns:
+        Token string if found, None otherwise
+    """
+    try:
+        with open(token_file, "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return None
+
+
+def get_embedding_model():
     """
     Lazy-load the sentence-transformers model once and reuse it.
+    WARNING: May cause OpenMP lock issues on M1 Macs.
+    Consider using USE_CLOUD_EMBEDDINGS=True instead.
     """
     global _embedding_model
     if _embedding_model is None:
+        # Import only when needed to avoid M1 lock issues
+        from sentence_transformers import SentenceTransformer
         _embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
     return _embedding_model
+
+
+def get_query_embedding_cloud(question: str, hf_token: str) -> List[float]:
+    """
+    Compute embedding using HuggingFace Inference API (cloud-based).
+    M1 Mac compatible - avoids OpenMP mutex lock issues.
+    
+    Args:
+        question: Text to embed
+        hf_token: HuggingFace API token
+        
+    Returns:
+        Embedding vector as list of floats
+    """
+    from huggingface_hub import InferenceClient
+    import numpy as np
+    
+    client = InferenceClient(token=hf_token)
+    response = client.feature_extraction(
+        question,
+        model=EMBEDDING_MODEL_NAME
+    )
+    embedding = np.array(response)
+    
+    # Handle 2D output (average pooling)
+    if len(embedding.shape) == 2:
+        embedding = np.mean(embedding, axis=0)
+    
+    # Normalize
+    embedding = embedding / np.linalg.norm(embedding)
+    
+    return embedding.tolist()
 
 
 def get_query_embedding(question: str) -> List[float]:
     """
     Compute an embedding vector for the user question.
     This will be used later for embedding-based retrieval in Neo4j.
+    
+    Automatically uses cloud API if USE_CLOUD_EMBEDDINGS=True (recommended for M1).
     """
+    if USE_CLOUD_EMBEDDINGS:
+        hf_token = load_hf_token()
+        if hf_token:
+            return get_query_embedding_cloud(question, hf_token)
+        else:
+            print("WARNING: Cloud embeddings enabled but hf.txt not found.")
+            print("Falling back to local model (may cause M1 issues).")
+            print("Create hf.txt with your HuggingFace token to use cloud mode.")
+    
+    # Fallback to local model
     model = get_embedding_model()
     emb = model.encode(question, normalize_embeddings=True)  # numpy array
     return emb.tolist()  # convert to Python list (easier to store/send)

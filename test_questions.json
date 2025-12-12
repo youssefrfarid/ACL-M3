@@ -1,0 +1,111 @@
+[
+  {
+    "id": 1,
+    "question": "Who scored the most points in the 2023-24 season?",
+    "intent": "player_info",
+    "difficulty": "easy",
+    "expected_info": "Top scorer name and point total"
+  },
+  {
+    "id": 2,
+    "question": "How many goals did Haaland score?",
+    "intent": "player_info",
+    "difficulty": "easy",
+    "expected_info": "Haaland's goal count"
+  },
+  {
+    "id": 3,
+    "question": "Compare Salah and Son's performance in 2023-24",
+    "intent": "compare_players",
+    "difficulty": "medium",
+    "expected_info": "Stats comparison between two players"
+  },
+  {
+    "id": 4,
+    "question": "Who is better: De Bruyne or Odegaard?",
+    "intent": "compare_players",
+    "difficulty": "medium",
+    "expected_info": "Comparison with subjective recommendation"
+  },
+  {
+    "id": 5,
+    "question": "What are Arsenal's fixtures in gameweek 5 to 7?",
+    "intent": "fixture_info",
+    "difficulty": "medium",
+    "expected_info": "Fixture list for specific team and gameweeks"
+  },
+  {
+    "id": 6,
+    "question": "Recommend a midfielder under 8 million with good form",
+    "intent": "player_recommendation",
+    "difficulty": "hard",
+    "expected_info": "Player recommendation with budget constraint"
+  },
+  {
+    "id": 7,
+    "question": "Which defender should I buy from a strong defensive team?",
+    "intent": "player_recommendation",
+    "difficulty": "hard",
+    "expected_info": "Defender recommendation based on team defense"
+  },
+  {
+    "id": 8,
+    "question": "Which team has the best defense?",
+    "intent": "team_recommendation",
+    "difficulty": "easy",
+    "expected_info": "Team with lowest goals conceded"
+  },
+  {
+    "id": 9,
+    "question": "Show me the top 5 scorers",
+    "intent": "player_info",
+    "difficulty": "easy",
+    "expected_info": "List of top 5 players by points"
+  },
+  {
+    "id": 10,
+    "question": "Who are the best midfielders?",
+    "intent": "player_recommendation",
+    "difficulty": "medium",
+    "expected_info": "Top midfielders by performance"
+  },
+  {
+    "id": 11,
+    "question": "Tell me about Mohamed Salah's season",
+    "intent": "player_info",
+    "difficulty": "easy",
+    "expected_info": "Salah's season statistics"
+  },
+  {
+    "id": 12,
+    "question": "Who is the best player?",
+    "intent": "general_question",
+    "difficulty": "hard",
+    "expected_info": "Subjective but should cite top performer",
+    "note": "Vague question - tests handling of ambiguity"
+  },
+  {
+    "id": 13,
+    "question": "Tell me about Mbappe",
+    "intent": "player_info",
+    "difficulty": "hard",
+    "expected_info": "Should say not in dataset",
+    "note": "Player not in FPL dataset - tests hallucination prevention"
+  },
+  {
+    "id": 14,
+    "question": "What happened in gameweek 1?",
+    "intent": "general_question",
+    "difficulty": "medium",
+    "expected_info": "Info about gameweek 1 events",
+    "note": "Lacks context - tests handling of broad queries"
+  },
+  {
+    "id": 15,
+    "question": "Compare the top 3 forwards",
+    "intent": "compare_players",
+    "difficulty": "hard",
+    "expected_info": "Multi-player comparison",
+    "note": "Tests handling of multiple players"
+  }
+]
