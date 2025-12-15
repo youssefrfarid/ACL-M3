@@ -57,7 +57,7 @@ RETRIEVAL_METHODS = {
 
 # Example questions
 EXAMPLE_QUESTIONS = [
-    "Who scored the most points in 2023-24?",
+    "Who scored the most points in 2022-23?",
     "Compare Salah and Haaland",
     "Recommend a midfielder under 8 million",
     "Which team has the best defense?",
@@ -66,7 +66,35 @@ EXAMPLE_QUESTIONS = [
 ]
 
 
-# =====================  GRAPH VISUALIZATION  =====================
+def set_question(q):
+    """Callback to set the question input."""
+    st.session_state.question_input = q
+
+
+
+def extract_cypher_queries(results: Dict[str, Any]) -> List[str]:
+    """Extract Cypher queries from retrieval results."""
+    queries = []
+    
+    # Check baseline results (old metadata structure)
+    baseline_meta = results.get("baseline_metadata", {})
+    if "cypher_query" in baseline_meta:
+        queries.append(baseline_meta["cypher_query"])
+        
+    # Check direct query result (new structure)
+    if "cypher_query" in results:
+        queries.append(results["cypher_query"])
+    elif "baseline_result" in results and "cypher_query" in results["baseline_result"]:
+        queries.append(results["baseline_result"]["cypher_query"])
+    
+    # Check for query in baseline_players metadata
+    if not queries and results.get("baseline_players"):
+        # The actual query might be embedded in the retrieval logic
+        # For now, we'll note that queries were executed if we missed capturing it
+        pass
+    
+    return queries
+
 
 def create_knowledge_graph(hybrid_results: Dict[str, Any]) -> nx.Graph:
     """
@@ -138,43 +166,49 @@ def visualize_graph(G: nx.Graph) -> go.Figure:
         )
         return fig
     
-    # Calculate layout
-    pos = nx.spring_layout(G, k=1, iterations=50)
+    # Calculate layout - Use Kamada-Kawai for better separation (Neo4j-like)
+    # Fallback to spring if kamada_kawai fails (requires scipy)
+    try:
+        pos = nx.kamada_kawai_layout(G)
+    except:
+        pos = nx.spring_layout(G, k=0.5, iterations=100)
     
     # Prepare edge traces with FPL styling
+    edge_x = []
+    edge_y = []
+    for edge in G.edges():
+        x0, y0 = pos[edge[0]]
+        x1, y1 = pos[edge[1]]
+        edge_x.extend([x0, x1, None])
+        edge_y.extend([y0, y1, None])
+
     edge_trace = go.Scatter(
-        x=[],
-        y=[],
-        line=dict(width=2, color='rgba(0, 255, 135, 0.3)'),  # Semi-transparent green edges
+        x=edge_x,
+        y=edge_y,
+        line=dict(width=1.5, color='rgba(200, 200, 200, 0.4)'), 
         hoverinfo='none',
         mode='lines'
     )
     
-    for edge in G.edges():
-        x0, y0 = pos[edge[0]]
-        x1, y1 = pos[edge[1]]
-        edge_trace['x'] += (x0, x1, None)
-        edge_trace['y'] += (y0, y1, None)
-    
-    # Prepare node traces (separate for players and teams)
+    # Prepare node traces (separate for players and teams for legend)
     player_nodes = [node for node, data in G.nodes(data=True) if data.get('node_type') == 'player']
     team_nodes = [node for node, data in G.nodes(data=True) if data.get('node_type') == 'team']
     
     # Position colors based on FPL official theme
     position_colors = {
-        'GK': '#FFD700',   # Gold (Keepers) - Premium look
-        'DEF': '#00FF87',  # Neon Green (Defenders) - FPL Official
-        'MID': '#04F5FF',  # Cyan Blue (Midfielders) - FPL Official
-        'FWD': '#E90052',  # Magenta Pink (Forwards) - FPL Official
+        'GK': '#FFD700',   # Gold (Keepers)
+        'DEF': '#00FF87',  # Neon Green (Defenders)
+        'MID': '#04F5FF',  # Cyan Blue (Midfielders)
+        'FWD': '#E90052',  # Magenta Pink (Forwards)
         'UNK': '#9B9B9B'   # Silver Gray
     }
     
-    # Player node trace
+    # PLAYER NODES
     player_x = [pos[node][0] for node in player_nodes]
     player_y = [pos[node][1] for node in player_nodes]
     player_colors = [position_colors.get(G.nodes[node].get('position', 'UNK'), '#808080') for node in player_nodes]
     player_text = [
-        f"{node}<br>Position: {G.nodes[node].get('position', 'N/A')}<br>"
+        f"<b>{node}</b><br>Position: {G.nodes[node].get('position', 'N/A')}<br>"
         f"Team: {G.nodes[node].get('team', 'N/A')}<br>"
         f"Points: {G.nodes[node].get('total_points', 'N/A')}"
         for node in player_nodes
@@ -183,22 +217,19 @@ def visualize_graph(G: nx.Graph) -> go.Figure:
     player_trace = go.Scatter(
         x=player_x,
         y=player_y,
-        mode='markers+text',
+        mode='markers', # Text handled separately if needed, or on hover
         hoverinfo='text',
         hovertext=player_text,
-        text=[node.split()[-1] for node in player_nodes],  # Show last name
-        textposition="top center",
-        textfont=dict(size=10, color='white', family='Arial Black'),
         marker=dict(
-            size=22,
+            size=18,
             color=player_colors,
-            line=dict(width=3, color='#38003C'),  # Dark purple border
-            opacity=0.95
+            line=dict(width=2, color='white'),
+            opacity=1.0
         ),
         name='Players'
     )
-    
-    # Team node trace
+
+    # TEAM NODES
     team_x = [pos[node][0] for node in team_nodes]
     team_y = [pos[node][1] for node in team_nodes]
     
@@ -209,43 +240,50 @@ def visualize_graph(G: nx.Graph) -> go.Figure:
         hoverinfo='text',
         hovertext=[f"Team: {node}" for node in team_nodes],
         text=team_nodes,
-        textposition="bottom center",
-        textfont=dict(size=11, color='white', family='Arial Black'),
+        textposition="top center",
+        textfont=dict(size=12, color='#E90052', family='Arial Black'),
         marker=dict(
-            size=35,
-            color='#E90052',  # Magenta Pink for teams
-            symbol='diamond',  # Different shape for teams
-            line=dict(width=3, color='#00FF87'),  # Neon green border
-            opacity=0.95
+            size=25,
+            color='#E0E0E0', 
+            line=dict(width=3, color='#E90052'),
+            symbol='circle'
         ),
         name='Teams'
     )
     
-    # Create figure with FPL Dark Theme
+    # Create figure with Neo4j-like Dark Theme
     fig = go.Figure(
         data=[edge_trace, player_trace, team_trace],
         layout=go.Layout(
             title={
-                'text': 'Knowledge Graph Visualization',
-                'font': {'size': 24, 'color': '#00FF87', 'family': 'Arial Black'},
-                'x': 0.5,
-                'xanchor': 'center'
+                'text': 'Knowledge Graph Context',
+                'font': {'size': 20, 'color': '#FFFFFF'},
+                'x': 0.05,
+                'xanchor': 'left'
             },
             showlegend=True,
             hovermode='closest',
-            margin=dict(b=20, l=20, r=20, t=60),
+            hoverlabel=dict(
+                bgcolor="white",
+                font_size=12,
+                font_family="sans-serif",
+                font_color="black"
+            ),
+            margin=dict(b=20, l=20, r=20, t=50),
             xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
             yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            plot_bgcolor='#1a0020',  # Dark purple background
-            paper_bgcolor='#1a0020',  # Dark purple paper
-            font=dict(color='#00FF87', family='Arial'),
+            plot_bgcolor='#121212',  # Very dark grey (almost black)
+            paper_bgcolor='#121212',
+            font=dict(color='#FAFAFA'),
             legend=dict(
-                bgcolor='rgba(56, 0, 60, 0.8)',
-                bordercolor='#00FF87',
-                borderwidth=2,
-                font=dict(color='#00FF87', size=12)
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1,
+                font=dict(color='#FAFAFA')
             ),
-            height=550
+            height=600
         )
     )
     
@@ -264,8 +302,8 @@ def format_player_dataframe(players: List[Dict[str, Any]]) -> pd.DataFrame:
     for p in players:
         row = {}
         
-        # Always try to get player name
-        row["Player"] = p.get("name", p.get("player_name", "Unknown"))
+        # Always try to get name (Player or Team)
+        row["Name"] = p.get("name", p.get("player_name", "Unknown"))
         
         # Optional fields - only add if present in data
         if "position" in p and p["position"]:
@@ -292,9 +330,19 @@ def format_player_dataframe(players: List[Dict[str, Any]]) -> pd.DataFrame:
         if "minutes" in p:
             row["Minutes"] = int(p["minutes"]) if p["minutes"] else 0
         
+        # New fields for enhancements
+        if "price" in p:
+            row["Price"] = f"£{float(p['price']):.1f}m"
+
+        if "clean_sheets" in p:
+            row["Clean Sheets"] = int(p["clean_sheets"])
+            
+        if "goals_conceded" in p:
+            row["Conceded"] = int(p["goals_conceded"])
+        
         if "form" in p and p["form"] is not None:
             row["Form"] = f"{float(p['form']):.1f}"
-        
+            
         # Similarity score (from embeddings)
         if "score" in p:
             row["Similarity"] = f"{float(p['score']):.3f}"
@@ -304,22 +352,7 @@ def format_player_dataframe(players: List[Dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(df_data)
 
 
-def extract_cypher_queries(hybrid_results: Dict[str, Any]) -> List[str]:
-    """Extract Cypher queries from retrieval results."""
-    queries = []
-    
-    # Check if baseline results have cypher_query field
-    baseline_meta = hybrid_results.get("baseline_metadata", {})
-    if "cypher_query" in baseline_meta:
-        queries.append(baseline_meta["cypher_query"])
-    
-    # Check for query in baseline_players metadata
-    if hybrid_results.get("baseline_players"):
-        # The actual query might be embedded in the retrieval logic
-        # For now, we'll note that queries were executed
-        queries.append("# Baseline Cypher query executed (see graph_retrieval.py for details)")
-    
-    return queries
+
 
 
 # =====================  STREAMLIT APP  =====================
@@ -733,8 +766,13 @@ def main():
         # Example questions
         st.header("💡 Example Questions")
         for example in EXAMPLE_QUESTIONS:
-            if st.button(example, key=f"example_{example}", use_container_width=True):
-                st.session_state.current_question = example
+            st.button(
+                example, 
+                key=f"example_{example}", 
+                use_container_width=True,
+                on_click=set_question,
+                args=(example,)
+            )
         
         st.divider()
         
@@ -768,24 +806,12 @@ def main():
     # Main question input
     st.header("🤔 Ask a Question")
     
-    # Use session state for question if set by example button
-    default_question = st.session_state.get('current_question', '')
-    if default_question:
-        question = st.text_area(
-            "Enter your FPL question:",
-            value=default_question,
-            height=100,
-            key="question_input"
-        )
-        # Clear the current_question after using it
-        st.session_state.current_question = ''
-    else:
-        question = st.text_area(
-            "Enter your FPL question:",
-            height=100,
-            placeholder="e.g., Who scored the most points in 2023-24?",
-            key="question_input"
-        )
+    question = st.text_area(
+        "Enter your FPL question:",
+        height=100,
+        placeholder="e.g., Who scored the most points in 2022-23?",
+        key="question_input"
+    )
     
     # Ask button
     if st.button("🔍 Ask Question", type="primary", use_container_width=True):
@@ -817,11 +843,31 @@ def process_question(question: str, model_name: str, retrieval_method: str,
         entities = extract_entities(question, players, teams)
     
     # Display intent and entities
+    # Display intent and entities
     col1, col2 = st.columns(2)
     with col1:
         st.info(f"**Intent:** {intent}")
     with col2:
-        st.info(f"**Entities:** {', '.join(entities.player_names + entities.team_names) or 'None'}")
+        # Format all entities for display
+        ent_dict = entities.to_dict()
+        readable_entities = []
+        
+        if ent_dict.get('player_names'):
+            readable_entities.append(f"Players: {', '.join(ent_dict['player_names'])}")
+        if ent_dict.get('team_names'):
+            readable_entities.append(f"Teams: {', '.join(ent_dict['team_names'])}")
+        if ent_dict.get('position'):
+            readable_entities.append(f"Position: {ent_dict['position']}")
+        if ent_dict.get('season'):
+            readable_entities.append(f"Season: {ent_dict['season']}")
+        if ent_dict.get('stat_name'):
+            readable_entities.append(f"Stat: {ent_dict['stat_name']}")
+        if ent_dict.get('gameweek'):
+            readable_entities.append(f"GW: {ent_dict['gameweek']}")
+        if ent_dict.get('budget'):
+            readable_entities.append(f"Budget: {ent_dict['budget']}")
+            
+        st.info(f"**Entities:** {' | '.join(readable_entities) or 'None'}")
     
     # Step 3: Retrieval
     with st.spinner(f"Retrieving from Knowledge Graph ({retrieval_method})..."):
@@ -835,7 +881,9 @@ def process_question(question: str, model_name: str, retrieval_method: str,
             hybrid_results = {
                 "baseline_players": baseline_result.get("players", []),
                 "embedding_players": [],
-                "summary": {"baseline_player_count": len(baseline_result.get("players", [])), "embedding_player_count": 0}
+                "summary": {"baseline_player_count": len(baseline_result.get("players", [])), "embedding_player_count": 0},
+                "baseline_result": baseline_result, # Store full result for metadata
+                "cypher_query": baseline_result.get("cypher_query") # Direct access
             }
         elif retrieval_method == "embeddings":
             # Only embeddings
@@ -844,7 +892,8 @@ def process_question(question: str, model_name: str, retrieval_method: str,
             hybrid_results = {
                 "baseline_players": [],
                 "embedding_players": embedding_result.get("players", []),
-                "summary": {"baseline_player_count": 0, "embedding_player_count": len(embedding_result.get("players", []))}
+                "summary": {"baseline_player_count": 0, "embedding_player_count": len(embedding_result.get("players", []))},
+                "cypher_query": "No Cypher query used (Embeddings Mode)"
             }
         else:
             # Hybrid
@@ -856,12 +905,53 @@ def process_question(question: str, model_name: str, retrieval_method: str,
                 top_k=10
             )
     
-    # Display retrieval statistics
-    summary = hybrid_results.get("summary", {})
-    st.success(f"✅ Retrieved: {summary.get('baseline_player_count', 0)} baseline players, "
-              f"{summary.get('embedding_player_count', 0)} embedding players")
-    
-    # Step 4: Display KG context
+    # Step 4: Generate LLM Answer (MOVED TO TOP)
+    st.header("💬 LLM Answer")
+    with st.spinner(f"Generating answer with {model_name.upper()}..."):
+        try:
+            # Display retrieval statistics small
+            summary = hybrid_results.get("summary", {})
+            st.caption(f"Context: {summary.get('baseline_player_count', 0)} baseline items + {summary.get('embedding_player_count', 0)} embedding items")
+            
+            result = generate_fpl_answer(
+                question=question,
+                hybrid_results=hybrid_results,
+                model_name=model_name,
+                hf_token=hf_token
+            )
+            
+            if result.get('success'):
+                # Big answer box
+                st.success(result['answer'])
+                
+                # Response metadata
+                elapsed_time = time.time() - start_time
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Response Time", f"{elapsed_time:.2f}s")
+                with col2:
+                    st.metric("Model", model_name.upper())
+                with col3:
+                    st.metric("Tokens", result.get('token_count', 'N/A'))
+                
+                # Add to history
+                st.session_state.history.append({
+                    'question': question,
+                    'answer': result['answer'],
+                    'model': model_name,
+                    'method': retrieval_method,
+                    'time': elapsed_time
+                })
+            else:
+                st.error(f"❌ Error generating answer: {result.get('error', 'Unknown error')}")
+        
+        except Exception as e:
+            st.error(f"❌ Error: {e}")
+            import traceback
+            with st.expander("View error details"):
+                st.code(traceback.format_exc())
+
+    # Step 5: Knowledge Graph Context (MOVED DOWN)
     st.header("📊 Knowledge Graph Context")
     
     baseline_players = hybrid_results.get("baseline_players", [])
@@ -870,11 +960,11 @@ def process_question(question: str, model_name: str, retrieval_method: str,
     # Tabs for different views
     tab1, tab2, tab3 = st.tabs(["Combined View", "Baseline Results", "Embedding Results"])
     
-    # Step 5: Show KG Context with enhanced dataframes
+    # ... (Dataframe Logic - Keeping existing helper)
     
     # Helper for cleaner columns
     column_config = {
-        "Player": st.column_config.TextColumn("Player", width="medium", required=True),
+        "Name": st.column_config.TextColumn("Name", width="medium", required=True),
         "Team": st.column_config.TextColumn("Team", width="small"),
         "Position": st.column_config.TextColumn("Pos", width="small"),
         "Points": st.column_config.NumberColumn(
@@ -894,12 +984,24 @@ def process_question(question: str, model_name: str, retrieval_method: str,
             help="Assists",
             format="%d",
             min_value=0,
-            max_value=20, # Approx max assists
+            max_value=20, 
         ),
         "Form": st.column_config.NumberColumn(
             "Form",
             help="Recent Form",
             format="%.1f 🔥"
+        ),
+        "Price": st.column_config.TextColumn(
+            "Price",
+            help="Average Price",
+        ),
+        "Clean Sheets": st.column_config.NumberColumn(
+            "Clean Sheets",
+            help="Clean Sheets",
+        ),
+        "Conceded": st.column_config.NumberColumn(
+            "Conceded",
+            help="Goals Conceded",
         ),
         "Similarity": st.column_config.ProgressColumn(
             "Match",
@@ -947,7 +1049,7 @@ def process_question(question: str, model_name: str, retrieval_method: str,
         else:
             st.info("No embedding results (may be using baseline-only mode)")
     
-    # Step 5: Show Cypher queries
+    # Step 6: Show Cypher queries
     with st.expander("🔍 View Cypher Queries"):
         cypher_queries = extract_cypher_queries(hybrid_results)
         if cypher_queries:
@@ -956,7 +1058,7 @@ def process_question(question: str, model_name: str, retrieval_method: str,
         else:
             st.info("Cypher query details not available in current retrieval mode")
     
-    # Step 6: Graph visualization
+    # Step 7: Graph visualization
     st.header("🕸️ Knowledge Graph Visualization")
     try:
         G = create_knowledge_graph(hybrid_results)
@@ -977,47 +1079,6 @@ def process_question(question: str, model_name: str, retrieval_method: str,
             st.info("No graph data available for visualization")
     except Exception as e:
         st.warning(f"Graph visualization unavailable: {e}")
-    
-    # Step 7: Generate LLM answer
-    st.header("💬 LLM Answer")
-    with st.spinner(f"Generating answer with {model_name.upper()}..."):
-        try:
-            result = generate_fpl_answer(
-                question=question,
-                hybrid_results=hybrid_results,
-                model_name=model_name,
-                hf_token=hf_token
-            )
-            
-            if result.get('success'):
-                st.success(result['answer'])
-                
-                # Response metadata
-                elapsed_time = time.time() - start_time
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Response Time", f"{elapsed_time:.2f}s")
-                with col2:
-                    st.metric("Model", model_name.upper())
-                with col3:
-                    st.metric("Tokens", result.get('token_count', 'N/A'))
-                
-                # Add to history
-                st.session_state.history.append({
-                    'question': question,
-                    'answer': result['answer'],
-                    'model': model_name,
-                    'method': retrieval_method,
-                    'time': elapsed_time
-                })
-            else:
-                st.error(f"❌ Error generating answer: {result.get('error', 'Unknown error')}")
-        
-        except Exception as e:
-            st.error(f"❌ Error: {e}")
-            import traceback
-            with st.expander("View error details"):
-                st.code(traceback.format_exc())
 
 
 if __name__ == "__main__":

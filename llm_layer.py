@@ -73,10 +73,25 @@ def combine_contexts(hybrid_results: Dict[str, Any]) -> str:
                 player_str += f"\n   Points: {data['total_points']}"
             if "goals" in data:
                 player_str += f", Goals: {data['goals']}"
-            if "assists" in data:
-                player_str += f", Assists: {data['assists']}"
+            # Reorder specific stats to front for LLM visibility
+            parts = []
+            if "total_points" in data:
+                parts.append(f"Points: {data['total_points']}")
+            if "price" in data:
+                parts.append(f"Price: £{data['price']:.1f}m")
+            if "goals_scored" in data:
+                parts.append(f"Scored: {data['goals_scored']}")
+            if "clean_sheets" in data:
+                parts.append(f"Clean Sheets: {data['clean_sheets']}")
+            if "goals_conceded" in data:
+                parts.append(f"Conceded: {data['goals_conceded']}")
             if "form" in data and data["form"]:
-                player_str += f", Form: {data['form']:.1f}"
+                parts.append(f"Form: {data['form']:.1f}")
+            
+            # Combine
+            stats_str = ", ".join(parts)
+            player_str += f" - {stats_str}"
+            
             if "score" in data:  # Embedding similarity
                 player_str += f"\n   Similarity: {data['score']:.3f}"
             
@@ -125,6 +140,11 @@ Instructions:
 - Answer the user's question using ONLY the information provided in the context above
 - Be specific and cite statistics when available (e.g., "Haaland scored 36 goals and earned 238 points")
 - If the context doesn't contain the information needed, say "I don't have that information in the available data"
+- Note: For 'Goals Conceded' and 'Defensive Strength', a LOWER number indicates a BETTER defense.
+- The players are listed in descending order of relevance. The first player (1.) is typically the best recommendation.
+- When recommending players, prioritize those with the highest Points or Form.
+- If a budget is specified, choose the highest-scoring player that fits the budget.
+- Explicitly mention the Price and Points to justify the choice.
 - Keep answers concise but informative
 - DO NOT make up or hallucinate information not present in the context
 

@@ -153,7 +153,9 @@ class KnowledgeGraphBuilder:
                         'kickoff_time': row['kickoff_time'],
                         'gw_number': int(row['GW']),
                         'home_team': row['home_team'],
-                        'away_team': row['away_team']
+                        'away_team': row['away_team'],
+                        'home_score': int(row['team_h_score']) if row['team_h_score'] else 0,
+                        'away_score': int(row['team_a_score']) if row['team_a_score'] else 0
                     }
             
             for fixture_data in fixtures.values():
@@ -162,7 +164,9 @@ class KnowledgeGraphBuilder:
                     MATCH (home:Team {name: $home_team})
                     MATCH (away:Team {name: $away_team})
                     MERGE (f:Fixture {season: $season, fixture_number: $fixture_number})
-                    SET f.kickoff_time = $kickoff_time
+                    SET f.kickoff_time = $kickoff_time,
+                        f.home_score = $home_score,
+                        f.away_score = $away_score
                     MERGE (g)-[:HAS_FIXTURE]->(f)
                     MERGE (f)-[:HAS_HOME_TEAM]->(home)
                     MERGE (f)-[:HAS_AWAY_TEAM]->(away)
@@ -227,6 +231,7 @@ class KnowledgeGraphBuilder:
                     'threat': float(row['threat']) if row['threat'] else 0.0,
                     'ict_index': float(row['ict_index']) if row['ict_index'] else 0.0,
                     'form': float(row['form']) if row['form'] else 0.0,
+                    'value': int(row['value']) if row['value'] else 0,
                 }
                 
                 batch.append(played_in_data)
@@ -269,7 +274,8 @@ class KnowledgeGraphBuilder:
                 r.creativity = row.creativity,
                 r.threat = row.threat,
                 r.ict_index = row.ict_index,
-                r.form = row.form
+                r.form = row.form,
+                r.value = row.value
             """,
             batch=batch
         )

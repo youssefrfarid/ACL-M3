@@ -31,10 +31,9 @@ def q_player_season_summary(session, entities: QueryEntities) -> Dict[str, Any]:
     Returns aggregated stats for a single player across a season.
     """
     player = entities.player_names[0] if entities.player_names else None
-    season = entities.season or "2023-24"
+    season = entities.season or "2022-23"
 
-    result = session.run(
-        """
+    cypher = """
         MATCH (p:Player {player_name: $player_name})
         MATCH (p)-[r:PLAYED_IN]->(f:Fixture {season: $season})
         WITH p,
@@ -48,13 +47,15 @@ def q_player_season_summary(session, entities: QueryEntities) -> Dict[str, Any]:
                $season AS season,
                minutes, goals, assists, total_points, clean_sheets, bonus
         ORDER BY total_points DESC
-        """,
+        """
+    result = session.run(
+        cypher,
         player_name=player,
         season=season,
     )
 
     rows = [rec.data() for rec in result]
-    return {"template": "player_season_summary", "players": rows}
+    return {"template": "player_season_summary", "players": rows, "cypher_query": cypher.strip()}
 
 
 def q_player_recent_form(session, entities: QueryEntities) -> Dict[str, Any]:
@@ -63,11 +64,10 @@ def q_player_recent_form(session, entities: QueryEntities) -> Dict[str, Any]:
     Returns the last N fixtures for a player with aggregated form stats.
     """
     player = entities.player_names[0] if entities.player_names else None
-    season = entities.season or "2023-24"
+    season = entities.season or "2022-23"
     n = entities.horizon_gw or 5
 
-    result = session.run(
-        """
+    cypher = """
         MATCH (p:Player {player_name: $player_name})
         MATCH (p)-[r:PLAYED_IN]->(f:Fixture {season: $season})
         WITH p, r, f
@@ -84,14 +84,16 @@ def q_player_recent_form(session, entities: QueryEntities) -> Dict[str, Any]:
         RETURN p.player_name AS name,
                last_fixtures,
                avg_points
-        """,
+        """
+    result = session.run(
+        cypher,
         player_name=player,
         season=season,
         n=n,
     )
 
     rows = [rec.data() for rec in result]
-    return {"template": "player_recent_form", "players": rows}
+    return {"template": "player_recent_form", "players": rows, "cypher_query": cypher.strip()}
 
 
 def q_top_players_by_position(session, entities: QueryEntities) -> Dict[str, Any]:
@@ -100,11 +102,10 @@ def q_top_players_by_position(session, entities: QueryEntities) -> Dict[str, Any
     Returns top players in a specific position ranked by total points.
     """
     position = entities.position or "MID"
-    season = entities.season or "2023-24"
+    season = entities.season or "2022-23"
     limit = 20
 
-    result = session.run(
-        """
+    cypher = """
         MATCH (p:Player)-[:PLAYS_AS]->(pos:Position {name: $position})
         MATCH (p)-[r:PLAYED_IN]->(f:Fixture {season: $season})
         WITH p, pos,
@@ -118,13 +119,15 @@ def q_top_players_by_position(session, entities: QueryEntities) -> Dict[str, Any
                total_points, goals, assists, form
         ORDER BY total_points DESC
         LIMIT $limit
-        """,
+        """
+    result = session.run(
+        cypher,
         position=position,
         season=season,
         limit=limit,
     )
     rows = [rec.data() for rec in result]
-    return {"template": "top_players_by_position", "players": rows}
+    return {"template": "top_players_by_position", "players": rows, "cypher_query": cypher.strip()}
 
 
 def q_top_players_recent_form_position(session, entities: QueryEntities) -> Dict[str, Any]:
@@ -133,37 +136,46 @@ def q_top_players_recent_form_position(session, entities: QueryEntities) -> Dict
     Returns top players in a position based on recent gameweek performance.
     """
     position = entities.position or "MID"
-    season = entities.season or "2023-24"
+    season = entities.season or "2022-23"
     gw_start = entities.gameweek or 1
     gw_end = entities.horizon_gw or gw_start + 3
     limit = 20
 
-    result = session.run(
-        """
+    cypher = """
         MATCH (p:Player)-[:PLAYS_AS]->(pos:Position {name: $position})
         MATCH (p)-[r:PLAYED_IN]->(f:Fixture {season: $season})
+        WHERE ($budget IS NULL OR r.value / 10.0 <= $budget)
         MATCH (g:Gameweek {season: $season})-[:HAS_FIXTURE]->(f)
         WHERE g.GW_number >= $gw_start AND g.GW_number <= $gw_end
         WITH p, pos,
              SUM(r.total_points) AS total_points,
              SUM(r.goals_scored) AS goals,
-             AVG(r.form) AS avg_form
+             SUM(r.clean_sheets) AS clean_sheets,
+             SUM(r.goals_conceded) AS goals_conceded,
+             AVG(r.form) AS avg_form,
+             AVG(r.value) / 10.0 AS price
         RETURN p.player_name AS name,
                pos.name AS position,
                total_points,
                goals,
-               avg_form
+               clean_sheets,
+               goals_conceded,
+               avg_form,
+               price
         ORDER BY avg_form DESC, total_points DESC
         LIMIT $limit
-        """,
+        """
+    result = session.run(
+        cypher,
         position=position,
         season=season,
         gw_start=gw_start,
         gw_end=gw_end,
         limit=limit,
+        budget=entities.budget,
     )
     rows = [rec.data() for rec in result]
-    return {"template": "top_recent_form_position", "players": rows}
+    return {"template": "top_recent_form_position", "players": rows, "cypher_query": cypher.strip()}
 
 
 def q_team_fixtures_range(session, entities: QueryEntities) -> Dict[str, Any]:
@@ -172,12 +184,11 @@ def q_team_fixtures_range(session, entities: QueryEntities) -> Dict[str, Any]:
     Returns fixtures for a specific team within a gameweek range.
     """
     team = entities.team_names[0] if entities.team_names else None
-    season = entities.season or "2023-24"
+    season = entities.season or "2022-23"
     gw_start = entities.gameweek or 1
     gw_end = entities.horizon_gw or gw_start + 3
 
-    result = session.run(
-        """
+    cypher = """
         MATCH (t:Team {name: $team_name})
         MATCH (g:Gameweek {season: $season})
         WHERE g.GW_number >= $gw_start AND g.GW_number <= $gw_end
@@ -191,7 +202,9 @@ def q_team_fixtures_range(session, entities: QueryEntities) -> Dict[str, Any]:
                away.name AS away_team,
                f.kickoff_time AS kickoff
         ORDER BY g.GW_number, fixture
-        """,
+        """
+    result = session.run(
+        cypher,
         team_name=team,
         season=season,
         gw_start=gw_start,
@@ -199,7 +212,7 @@ def q_team_fixtures_range(session, entities: QueryEntities) -> Dict[str, Any]:
     )
 
     rows = [rec.data() for rec in result]
-    return {"template": "team_fixtures_range", "fixtures": rows}
+    return {"template": "team_fixtures_range", "fixtures": rows, "cypher_query": cypher.strip()}
 
 
 def q_team_defensive_strength(session, entities: QueryEntities) -> Dict[str, Any]:
@@ -213,40 +226,107 @@ def q_team_defensive_strength(session, entities: QueryEntities) -> Dict[str, Any
 
     if season:
         # Filter by specific season
-        result = session.run(
-            """
+        cypher = """
             MATCH (t:Team)
-            MATCH (f:Fixture {season: $season})
-            MATCH (p:Player)-[r:PLAYED_IN]->(f)
-            WHERE (f)-[:HAS_HOME_TEAM]->(t) OR (f)-[:HAS_AWAY_TEAM]->(t)
-            WITH t, SUM(r.goals_conceded) AS goals_conceded
-            RETURN t.name AS team,
-                   goals_conceded
-            ORDER BY goals_conceded ASC
+            // Get Home Stats
+            OPTIONAL MATCH (t)<-[:HAS_HOME_TEAM]-(fh:Fixture {season: $season})
+            WITH t, 
+                 SUM(COALESCE(fh.home_score, 0)) AS home_scored, 
+                 SUM(COALESCE(fh.away_score, 0)) AS home_conceded
+            
+            // Get Away Stats
+            OPTIONAL MATCH (t)<-[:HAS_AWAY_TEAM]-(fa:Fixture {season: $season})
+            WITH t, home_scored, home_conceded,
+                 SUM(COALESCE(fa.away_score, 0)) AS away_scored,
+                 SUM(COALESCE(fa.home_score, 0)) AS away_conceded
+            
+            // Combine Goals
+            WITH t, 
+                 (home_scored + away_scored) AS goals_scored,
+                 (home_conceded + away_conceded) AS goals_conceded
+                 
+            // Re-match fixtures for points calculation
+            MATCH (t)<-[:HAS_HOME_TEAM]-(fh2:Fixture {season: $season})
+            WITH t, goals_scored, goals_conceded, 
+                 collect({h: fh2.home_score, a: fh2.away_score}) AS home_games
+            
+            MATCH (t)<-[:HAS_AWAY_TEAM]-(fa2:Fixture {season: $season})
+            WITH t, goals_scored, goals_conceded, home_games,
+                 collect({h: fa2.home_score, a: fa2.away_score}) AS away_games
+            
+            WITH t, goals_scored, goals_conceded,
+                 REDUCE(s = 0, g IN home_games | s + CASE WHEN g.h > g.a THEN 3 WHEN g.h = g.a THEN 1 ELSE 0 END) AS home_points,
+                 REDUCE(s = 0, g IN away_games | s + CASE WHEN g.a > g.h THEN 3 WHEN g.a = g.h THEN 1 ELSE 0 END) AS away_points
+
+            RETURN t.name AS name,
+                   goals_conceded,
+                   goals_scored,
+                   (home_points + away_points) AS total_points
+            ORDER BY total_points DESC
             LIMIT $limit
-            """,
+            """
+        result = session.run(
+            cypher,
             season=season,
             limit=limit,
         )
     else:
-        # Aggregate across all seasons
-        result = session.run(
-            """
+        # Aggregate across all seasons using match scores
+        cypher = """
             MATCH (t:Team)
-            MATCH (f:Fixture)
-            MATCH (p:Player)-[r:PLAYED_IN]->(f)
-            WHERE (f)-[:HAS_HOME_TEAM]->(t) OR (f)-[:HAS_AWAY_TEAM]->(t)
-            WITH t, SUM(r.goals_conceded) AS goals_conceded
-            RETURN t.name AS team,
-                   goals_conceded
-            ORDER BY goals_conceded ASC
+            // Get Home Stats
+            OPTIONAL MATCH (t)<-[:HAS_HOME_TEAM]-(fh:Fixture)
+            WITH t, 
+                 SUM(COALESCE(fh.home_score, 0)) AS home_scored, 
+                 SUM(COALESCE(fh.away_score, 0)) AS home_conceded
+            
+            // Get Away Stats
+            OPTIONAL MATCH (t)<-[:HAS_AWAY_TEAM]-(fa:Fixture)
+            WITH t, home_scored, home_conceded,
+                 SUM(COALESCE(fa.away_score, 0)) AS away_scored,
+                 SUM(COALESCE(fa.home_score, 0)) AS away_conceded
+            
+            // Combine
+            WITH t, 
+                 (home_scored + away_scored) AS goals_scored,
+                 (home_conceded + away_conceded) AS goals_conceded
+            
+            // Calculate Points (approximate wins/draws not stored, but can infer? No, sticking to goals for now)
+            // Wait, we need points to sort 'Best Team'. 
+            // We can re-add points from Player sums (sum(total_points)/11) OR infer points from scores:
+            // win=3, draw=1.
+            
+            // Re-match fixtures for points calculation
+            MATCH (t)<-[:HAS_HOME_TEAM]-(fh2:Fixture)
+            WITH t, goals_scored, goals_conceded, 
+                 collect({h: fh2.home_score, a: fh2.away_score}) AS home_games
+            
+            MATCH (t)<-[:HAS_AWAY_TEAM]-(fa2:Fixture)
+            WITH t, goals_scored, goals_conceded, home_games,
+                 collect({h: fa2.home_score, a: fa2.away_score}) AS away_games
+            
+            // Calculate points in Python or complex Cypher? 
+            // Simpler: Use the Player Sum for points (it's accurate enough as Sum Total Points of Team)
+            // But user dislikes that. Let's do purely score-based points.
+            
+            WITH t, goals_scored, goals_conceded,
+                 REDUCE(s = 0, g IN home_games | s + CASE WHEN g.h > g.a THEN 3 WHEN g.h = g.a THEN 1 ELSE 0 END) AS home_points,
+                 REDUCE(s = 0, g IN away_games | s + CASE WHEN g.a > g.h THEN 3 WHEN g.a = g.h THEN 1 ELSE 0 END) AS away_points
+            
+            RETURN t.name AS name,
+                   goals_conceded,
+                   goals_scored,
+                   (home_points + away_points) AS total_points
+            ORDER BY total_points DESC
             LIMIT $limit
-            """,
+            """
+        result = session.run(
+            cypher,
             limit=limit,
         )
 
     rows = [rec.data() for rec in result]
-    return {"template": "team_defensive_strength", "teams": rows}
+    return {"template": "team_stats", "players": rows, "cypher_query": cypher.strip()}
 
 
 def q_compare_two_players(session, entities: QueryEntities) -> Dict[str, Any]:
@@ -254,11 +334,10 @@ def q_compare_two_players(session, entities: QueryEntities) -> Dict[str, Any]:
     T7 – Compare two players (season totals)
     Returns season stats for multiple players for comparison.
     """
-    season = entities.season or "2023-24"
+    season = entities.season or "2022-23"
     players = entities.player_names or []
 
-    result = session.run(
-        """
+    cypher = """
         MATCH (p:Player)
         WHERE p.player_name IN $player_names
         MATCH (p)-[r:PLAYED_IN]->(f:Fixture {season: $season})
@@ -271,12 +350,14 @@ def q_compare_two_players(session, entities: QueryEntities) -> Dict[str, Any]:
         RETURN p.player_name AS name,
                total_points, goals, assists, minutes, form
         ORDER BY total_points DESC
-        """,
+        """
+    result = session.run(
+        cypher,
         player_names=players,
         season=season,
     )
     rows = [rec.data() for rec in result]
-    return {"template": "compare_two_players", "players": rows}
+    return {"template": "compare_two_players", "players": rows, "cypher_query": cypher.strip()}
 
 
 def q_top_scorers_overall(session, entities: QueryEntities) -> Dict[str, Any]:
@@ -284,11 +365,10 @@ def q_top_scorers_overall(session, entities: QueryEntities) -> Dict[str, Any]:
     T8 – Overall top points leaderboard
     Returns top players ranked by total points in a season.
     """
-    season = entities.season or "2023-24"
+    season = entities.season or "2022-23"
     limit = 30
 
-    result = session.run(
-        """
+    cypher = """
         MATCH (p:Player)-[r:PLAYED_IN]->(f:Fixture {season: $season})
         WITH p,
              SUM(r.total_points) AS total_points,
@@ -298,12 +378,14 @@ def q_top_scorers_overall(session, entities: QueryEntities) -> Dict[str, Any]:
                total_points, goals, assists
         ORDER BY total_points DESC
         LIMIT $limit
-        """,
+        """
+    result = session.run(
+        cypher,
         season=season,
         limit=limit,
     )
     rows = [rec.data() for rec in result]
-    return {"template": "top_scorers_overall", "players": rows}
+    return {"template": "top_scorers_overall", "players": rows, "cypher_query": cypher.strip()}
 
 
 def q_cheap_defenders_from_strong_defences(session, entities: QueryEntities) -> Dict[str, Any]:
@@ -312,10 +394,10 @@ def q_cheap_defenders_from_strong_defences(session, entities: QueryEntities) -> 
     Returns defenders from teams with low goals conceded.
     (Budget filtering commented out if price property doesn't exist)
     """
-    season = entities.season or "2023-24"
+    season = entities.season or "2022-23"
     limit = 20
-    budget = entities.budget  # may be None
-
+    # Budget filtering enabled
+    
     cypher = """
     MATCH (team:Team)
     MATCH (f:Fixture {season: $season})
@@ -323,18 +405,22 @@ def q_cheap_defenders_from_strong_defences(session, entities: QueryEntities) -> 
     WHERE ((f)-[:HAS_HOME_TEAM]->(team) OR (f)-[:HAS_AWAY_TEAM]->(team))
       AND EXISTS { MATCH (p)-[:PLAYS_AS]->(:Position {name: 'DEF'}) }
     WITH team, p, SUM(r.goals_conceded) AS goals_conceded,
-         SUM(r.total_points) AS total_points
+         SUM(r.total_points) AS total_points,
+         AVG(r.value) / 10.0 AS price
+    WHERE ($budget IS NULL OR price <= $budget)
+    
     RETURN p.player_name AS name,
            team.name AS team,
            goals_conceded,
-           total_points
+           total_points,
+           price
     ORDER BY goals_conceded ASC, total_points DESC
     LIMIT $limit
     """
 
-    result = session.run(cypher, season=season, limit=limit)
+    result = session.run(cypher, season=season, limit=limit, budget=entities.budget)
     rows = [rec.data() for rec in result]
-    return {"template": "cheap_defenders_from_strong_defences", "players": rows}
+    return {"template": "cheap_defenders_from_strong_defences", "players": rows, "cypher_query": cypher.strip()}
 
 
 def q_leaderboard_by_stat(session, entities: QueryEntities) -> Dict[str, Any]:
@@ -342,7 +428,7 @@ def q_leaderboard_by_stat(session, entities: QueryEntities) -> Dict[str, Any]:
     T10 – Generic fallback leaderboard by stat (e.g. goals or assists)
     Returns top players ranked by a specific stat.
     """
-    season = entities.season or "2023-24"
+    season = entities.season or "2022-23"
     stat = entities.stat_name or "goals_scored"
     limit = 20
 
@@ -366,7 +452,7 @@ def q_leaderboard_by_stat(session, entities: QueryEntities) -> Dict[str, Any]:
 
     result = session.run(cypher, season=season, limit=limit)
     rows = [rec.data() for rec in result]
-    return {"template": f"leaderboard_by_{prop}", "players": rows}
+    return {"template": f"leaderboard_by_{prop}", "players": rows, "cypher_query": cypher.strip()}
 
 
 # ROUTER FUNCTION
@@ -406,8 +492,10 @@ def run_baseline_retrieval(intent: str, entities: QueryEntities) -> Dict[str, An
 
         # Case 5: Team Recommendation
         elif intent == INTENT_TEAM_RECOMMEND:
-            # If position specified, treat as player recommendation for that team context
-            if entities.position:
+            # If position specified, treat as player recommendation unless it's explicitly defensive (likely "best defense")
+            if entities.position == "DEF":
+                 result = q_team_defensive_strength(session, entities)
+            elif entities.position:
                 result = q_top_players_recent_form_position(session, entities)
             else:
                 result = q_team_defensive_strength(session, entities)
@@ -428,6 +516,10 @@ def run_baseline_retrieval(intent: str, entities: QueryEntities) -> Dict[str, An
     result["mode"] = "baseline"
     result["intent"] = intent
     result["entities"] = entities.to_dict()
+    # Propagate cypher query if available
+    if "cypher_query" not in result:
+        result["cypher_query"] = "No Cypher query generated for this intent."
+    
     return result
 
 
