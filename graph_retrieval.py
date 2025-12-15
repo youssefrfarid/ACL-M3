@@ -693,19 +693,36 @@ def run_embedding_retrieval(
         # Fetch more candidates to allow for post-filtering
         fetch_k = top_k * 3
         
+        # Get player stats along with similarity scores
         result = session.run(
             """
             CALL db.index.vector.queryNodes($index_name, $top_k, $embedding)
             YIELD node, score
             MATCH (node)-[:PLAYS_AS]->(pos:Position)
+            
+            // Get season stats for the player
+            OPTIONAL MATCH (node)-[r:PLAYED_IN]->(f:Fixture {season: $season})
+            WITH node, score, pos,
+                 SUM(r.total_points) AS total_points,
+                 SUM(r.goals_scored) AS goals,
+                 SUM(r.assists) AS assists,
+                 SUM(r.minutes) AS minutes,
+                 AVG(r.form) AS form
+            
             RETURN node.player_name AS name,
                    score,
                    pos.name AS position,
-                   node.embedding_model AS model
+                   node.embedding_model AS model,
+                   total_points,
+                   goals,
+                   assists,
+                   minutes,
+                   form
             """,
             index_name=index_name,
             top_k=fetch_k,
             embedding=query_embedding,
+            season=entities.season or "2022-23",  # Default to latest season in data
         )
 
         raw_players = []
@@ -714,8 +731,13 @@ def run_embedding_retrieval(
                 "name": rec["name"],
                 "score": float(rec["score"]),
                 "position": rec["position"],
-                "team": None,  # Team not directly available in this schema
                 "model": rec["model"],
+                "total_points": rec["total_points"] or 0,
+                "goals": rec["goals"] or 0,
+                "assists": rec["assists"] or 0,
+                "minutes": rec["minutes"] or 0,
+                "form": float(rec["form"]) if rec["form"] else 0.0,
+                "team": None,  # Could add if needed
             })
 
     # Post-processing: Deduplicate and Filter

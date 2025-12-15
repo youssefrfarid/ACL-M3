@@ -271,20 +271,21 @@ def extract_season(question: str) -> Optional[str]:
     - "season 2022-23"
     """
     q = question.lower()
-    # Pattern 1: YYYY-YY (e.g., "2022-23")
-    m = re.search(r"(\d{4})[-/](\d{2})", q)
-    if m:
-        year1 = m.group(1)
-        year2 = m.group(2)
-        return f"{year1}-{year2}"
     
-    # Pattern 2: YYYY/YYYY (e.g., "2022/2023")
+    # Pattern 1: YYYY/YYYY (e.g., "2022/2023") - CHECK THIS FIRST!
     m = re.search(r"(\d{4})/(\d{4})", q)
     if m:
         year1 = m.group(1)
         year2 = m.group(2)
         # Convert to short format: 2022/2023 -> 2022-23
         return f"{year1}-{year2[-2:]}"
+    
+    # Pattern 2: YYYY-YY or YYYY/YY (e.g., "2022-23", "2022/23")
+    m = re.search(r"(\d{4})[-/](\d{2})", q)
+    if m:
+        year1 = m.group(1)
+        year2 = m.group(2)
+        return f"{year1}-{year2}"
     
     return None
 
