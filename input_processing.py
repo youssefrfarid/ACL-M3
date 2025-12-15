@@ -324,13 +324,76 @@ def extract_players_and_teams(
     known_teams: List[str],
 ) -> Tuple[List[str], List[str]]:
     """
-    Simple substring matching:
-    If the full player/team name appears in the question text.
+    Fuzzy matching for player and team names.
+    Uses rapidfuzz for partial ratio matching to handle:
+    - Partial names: 'salah' → 'Mohamed Salah'
+    - Typos: 'halaand' → 'Erling Haaland'
+    - Case variations
     """
+    from rapidfuzz import fuzz, process
+    
     q_low = question.lower()
-    players = [p for p in known_players if p and p.lower() in q_low]
-    teams = [t for t in known_teams if t and t.lower() in q_low]
-    return list(set(players)), list(set(teams))
+    
+    # First try exact substring matching (fast path)
+    exact_players = [p for p in known_players if p and p.lower() in q_low]
+    exact_teams = [t for t in known_teams if t and t.lower() in q_low]
+    
+    # If exact matching found results, return them
+    if exact_players or exact_teams:
+        return list(set(exact_players)), list(set(exact_teams))
+    
+    # Common stopwords to skip
+    stopwords = {'and', 'the', 'in', 'on', 'between', 'vs', 'versus', 'compare', 
+                 'with', 'from', 'for', 'terms', 'goals', 'points', 'assists', 'of'}
+    
+    # Fuzzy matching for players
+    # Split question into words and match against player names
+    words = [w for w in q_low.split() if w not in stopwords]
+    matched_players = set()
+    
+    for word in words:
+        if len(word) < 4:  # Skip very short words
+            continue
+        
+        # Find best matches for this word
+        matches = process.extract(
+            word,
+            known_players,
+            scorer=fuzz.partial_ratio,
+            limit=3,
+            score_cutoff=80  # Balance between catching typos and avoiding false positives
+        )
+        
+        for match, score, _ in matches:
+            # Check if any part of the player name is a strong match
+            name_parts = match.lower().split()
+            
+            # Require a very strong match on at least one name part
+            best_match_score = max(fuzz.ratio(word, part) for part in name_parts)
+            
+            # Threshold: 85% for good balance
+            if best_match_score >= 85:
+                matched_players.add(match)
+    
+    # Fuzzy matching for teams
+    matched_teams = set()
+    
+    for word in words:
+        if len(word) < 4:
+            continue
+        
+        matches = process.extract(
+            word,
+            known_teams,
+            scorer=fuzz.ratio,  # Use full ratio for teams
+            limit=2,
+            score_cutoff=85
+        )
+        
+        for match, score, _ in matches:
+            matched_teams.add(match)
+    
+    return list(matched_players), list(matched_teams)
 
 
 def extract_entities(

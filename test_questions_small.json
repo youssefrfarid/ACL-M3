@@ -1,0 +1,9 @@
+[
+    {
+        "id": 1,
+        "question": "Who scored the most points in the 2023-24 season?",
+        "intent": "player_info",
+        "difficulty": "easy",
+        "expected_info": "Top scorer name and point total"
+    }
+]

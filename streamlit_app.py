@@ -7,7 +7,7 @@ Features:
 - Retrieval method comparison (Baseline, Embeddings, Hybrid)
 - KG context transparency
 - Cypher query visualization
-- Graph visualization
+- Graph visualization (Interactive, FPL Themed)
 - Recommendations with explanations
 
 Usage:
@@ -87,13 +87,13 @@ def create_knowledge_graph(hybrid_results: Dict[str, Any]) -> nx.Graph:
     # Combine and deduplicate players
     all_players = {}
     for player in baseline_players + embedding_players:
-        player_id = player.get("player_name", "") + player.get("player_element", "")
-        if player_id not in all_players:
-            all_players[player_id] = player
+        # Retrieval returns 'name', not 'player_name'
+        player_name = player.get("name", player.get("player_name", ""))
+        if player_name and player_name not in all_players:
+            all_players[player_name] = player
     
     # Add player nodes
-    for player_id, player in all_players.items():
-        player_name = player.get("player_name", "Unknown")
+    for player_name, player in all_players.items():
         position = player.get("position", "UNK")
         team = player.get("team", "Unknown")
         total_points = player.get("total_points", 0)
@@ -107,11 +107,12 @@ def create_knowledge_graph(hybrid_results: Dict[str, Any]) -> nx.Graph:
         )
         
         # Add team node if not exists
-        if not G.has_node(team):
+        if team != "Unknown" and not G.has_node(team):
             G.add_node(team, node_type="team")
         
         # Add edge between player and team
-        G.add_edge(player_name, team, relationship="PLAYS_FOR")
+        if team != "Unknown":
+            G.add_edge(player_name, team, relationship="PLAYS_FOR")
     
     return G
 
@@ -140,11 +141,11 @@ def visualize_graph(G: nx.Graph) -> go.Figure:
     # Calculate layout
     pos = nx.spring_layout(G, k=1, iterations=50)
     
-    # Prepare edge traces
+    # Prepare edge traces with FPL styling
     edge_trace = go.Scatter(
         x=[],
         y=[],
-        line=dict(width=1, color='#888'),
+        line=dict(width=2, color='rgba(0, 255, 135, 0.3)'),  # Semi-transparent green edges
         hoverinfo='none',
         mode='lines'
     )
@@ -159,13 +160,13 @@ def visualize_graph(G: nx.Graph) -> go.Figure:
     player_nodes = [node for node, data in G.nodes(data=True) if data.get('node_type') == 'player']
     team_nodes = [node for node, data in G.nodes(data=True) if data.get('node_type') == 'team']
     
-    # Position colors based on position
+    # Position colors based on FPL official theme
     position_colors = {
-        'GK': '#FFA500',  # Orange
-        'DEF': '#4169E1',  # Blue
-        'MID': '#32CD32',  # Green
-        'FWD': '#FF4500',  # Red
-        'UNK': '#808080'   # Gray
+        'GK': '#FFD700',   # Gold (Keepers) - Premium look
+        'DEF': '#00FF87',  # Neon Green (Defenders) - FPL Official
+        'MID': '#04F5FF',  # Cyan Blue (Midfielders) - FPL Official
+        'FWD': '#E90052',  # Magenta Pink (Forwards) - FPL Official
+        'UNK': '#9B9B9B'   # Silver Gray
     }
     
     # Player node trace
@@ -187,10 +188,12 @@ def visualize_graph(G: nx.Graph) -> go.Figure:
         hovertext=player_text,
         text=[node.split()[-1] for node in player_nodes],  # Show last name
         textposition="top center",
+        textfont=dict(size=10, color='white', family='Arial Black'),
         marker=dict(
-            size=20,
+            size=22,
             color=player_colors,
-            line=dict(width=2, color='white')
+            line=dict(width=3, color='#38003C'),  # Dark purple border
+            opacity=0.95
         ),
         name='Players'
     )
@@ -207,27 +210,42 @@ def visualize_graph(G: nx.Graph) -> go.Figure:
         hovertext=[f"Team: {node}" for node in team_nodes],
         text=team_nodes,
         textposition="bottom center",
+        textfont=dict(size=11, color='white', family='Arial Black'),
         marker=dict(
-            size=30,
-            color='#FFD700',  # Gold
-            symbol='square',
-            line=dict(width=2, color='white')
+            size=35,
+            color='#E90052',  # Magenta Pink for teams
+            symbol='diamond',  # Different shape for teams
+            line=dict(width=3, color='#00FF87'),  # Neon green border
+            opacity=0.95
         ),
         name='Teams'
     )
     
-    # Create figure
+    # Create figure with FPL Dark Theme
     fig = go.Figure(
         data=[edge_trace, player_trace, team_trace],
         layout=go.Layout(
-            title='Knowledge Graph Visualization',
+            title={
+                'text': 'Knowledge Graph Visualization',
+                'font': {'size': 24, 'color': '#00FF87', 'family': 'Arial Black'},
+                'x': 0.5,
+                'xanchor': 'center'
+            },
             showlegend=True,
             hovermode='closest',
-            margin=dict(b=0, l=0, r=0, t=40),
+            margin=dict(b=20, l=20, r=20, t=60),
             xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
             yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-            plot_bgcolor='rgba(240,240,240,0.9)',
-            height=500
+            plot_bgcolor='#1a0020',  # Dark purple background
+            paper_bgcolor='#1a0020',  # Dark purple paper
+            font=dict(color='#00FF87', family='Arial'),
+            legend=dict(
+                bgcolor='rgba(56, 0, 60, 0.8)',
+                bordercolor='#00FF87',
+                borderwidth=2,
+                font=dict(color='#00FF87', size=12)
+            ),
+            height=550
         )
     )
     
@@ -237,25 +255,49 @@ def visualize_graph(G: nx.Graph) -> go.Figure:
 # =====================  HELPER FUNCTIONS  =====================
 
 def format_player_dataframe(players: List[Dict[str, Any]]) -> pd.DataFrame:
-    """Convert player list to formatted DataFrame."""
+    """Convert player list to formatted DataFrame with flexible field handling."""
     if not players:
         return pd.DataFrame()
     
-    # Select relevant fields
+    # Determine which columns are available from the data
     df_data = []
     for p in players:
-        row = {
-            "Player": p.get("player_name", "Unknown"),
-            "Team": p.get("team", "N/A"),
-            "Position": p.get("position", "N/A"),
-            "Points": p.get("total_points", 0),
-            "Goals": p.get("total_goals", 0),
-            "Assists": p.get("total_assists", 0),
-        }
+        row = {}
         
-        # Add similarity score if available (from embeddings)
-        if "similarity_score" in p:
-            row["Similarity"] = f"{p['similarity_score']:.3f}"
+        # Always try to get player name
+        row["Player"] = p.get("name", p.get("player_name", "Unknown"))
+        
+        # Optional fields - only add if present in data
+        if "position" in p and p["position"]:
+            row["Position"] = p["position"]
+        
+        if "team" in p and p["team"]:
+            row["Team"] = p["team"]
+        
+        if "season" in p and p["season"]:
+            row["Season"] = p["season"]
+        
+        # Stats fields
+        if "total_points" in p:
+            row["Points"] = int(p["total_points"]) if p["total_points"] else 0
+        
+        if "goals" in p:
+            row["Goals"] = int(p["goals"]) if p["goals"] else 0
+        elif "goals_scored" in p:
+            row["Goals"] = int(p["goals_scored"]) if p["goals_scored"] else 0
+        
+        if "assists" in p:
+            row["Assists"] = int(p["assists"]) if p["assists"] else 0
+        
+        if "minutes" in p:
+            row["Minutes"] = int(p["minutes"]) if p["minutes"] else 0
+        
+        if "form" in p and p["form"] is not None:
+            row["Form"] = f"{float(p['form']):.1f}"
+        
+        # Similarity score (from embeddings)
+        if "score" in p:
+            row["Similarity"] = f"{float(p['score']):.3f}"
         
         df_data.append(row)
     
@@ -285,25 +327,370 @@ def extract_cypher_queries(hybrid_results: Dict[str, Any]) -> List[str]:
 def main():
     """Main Streamlit application."""
     
-    # Custom CSS for better styling
+    # Custom CSS for FPL Dark Theme with Animations
     st.markdown("""
         <style>
-        .main-header {
-            font-size: 2.5rem;
-            font-weight: bold;
-            color: #1f77b4;
-            text-align: center;
-            margin-bottom: 1rem;
+        /* ==================== FPL OFFICIAL COLORS ==================== */
+        /* Primary: #38003C (Dark Purple)
+           Accent 1: #00FF87 (Neon Green)
+           Accent 2: #E90052 (Magenta Pink)
+           Accent 3: #04F5FF (Cyan Blue) */
+        
+        /* ==================== GLOBAL DARK THEME ==================== */
+        .stApp {
+            background: linear-gradient(135deg, #1a0020 0%, #2d1b3d 50%, #1a0020 100%);
+            background-attachment: fixed;
         }
+        
+        /* Main content area */
+        .main .block-container {
+            background-color: rgba(26, 0, 32, 0.6);
+            border-radius: 15px;
+            padding: 2rem;
+            backdrop-filter: blur(10px);
+            animation: fadeIn 0.5s ease-in;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(20px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        /* ==================== ANIMATED HEADER ==================== */
+        .main-header {
+            font-family: 'Arial Black', sans-serif;
+            font-size: 3.5rem;
+            font-weight: 900;
+            text-align: center;
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            background: linear-gradient(90deg, #00FF87, #04F5FF, #E90052, #00FF87);
+            background-size: 300% 100%;
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            animation: gradientFlow 3s ease infinite;
+            text-shadow: 0 0 30px rgba(0, 255, 135, 0.3);
+        }
+        
+        @keyframes gradientFlow {
+            0%, 100% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+        }
+        
         .sub-header {
-            font-size: 1.2rem;
-            color: #555;
+            font-family: 'Arial', sans-serif;
+            font-size: 1.4rem;
+            color: #00FF87;
             text-align: center;
             margin-bottom: 2rem;
+            font-weight: 500;
+            animation: pulse 2s ease-in-out infinite;
         }
-        .stAlert {
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+        
+        /* ==================== METRIC CARDS ==================== */
+        [data-testid="stMetricValue"] {
+            font-size: 2rem;
+            font-weight: bold;
+            background: linear-gradient(135deg, #00FF87, #04F5FF);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            animation: scaleIn 0.4s ease-out;
+        }
+        
+        @keyframes scaleIn {
+            from { transform: scale(0.8); opacity: 0; }
+            to { transform: scale(1); opacity: 1; }
+        }
+        
+        [data-testid="stMetricLabel"] {
+            font-weight: bold;
+            color: #E90052;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            font-size: 0.85rem;
+        }
+        
+        div[data-testid="metric-container"] {
+            background: linear-gradient(135deg, rgba(56, 0, 60, 0.8), rgba(56, 0, 60, 0.4));
+            border: 2px solid #00FF87;
+            border-radius: 12px;
+            padding: 1rem;
+            box-shadow: 0 4px 20px rgba(0, 255, 135, 0.2);
+            transition: all 0.3s ease;
+        }
+        
+        div[data-testid="metric-container"]:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 8px 30px rgba(0, 255, 135, 0.4);
+            border-color: #04F5FF;
+        }
+        
+        /* ==================== BUTTONS ==================== */
+        .stButton > button {
+            background: linear-gradient(135deg, #38003C, #5a0060) !important;
+            color: #00FF87 !important;
+            border: 2px solid #00FF87 !important;
+            border-radius: 10px;
+            font-weight: bold;
+            font-size: 1rem;
+            padding: 0.6rem 1.2rem;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0, 255, 135, 0.3);
+            position: relative;
+            overflow: hidden;
+        }
+        
+        .stButton > button:before {
+            content: '';
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            width: 0;
+            height: 0;
+            border-radius: 50%;
+            background: rgba(0, 255, 135, 0.3);
+            transform: translate(-50%, -50%);
+            transition: width 0.6s, height 0.6s;
+        }
+        
+        .stButton > button:hover:before {
+            width: 300px;
+            height: 300px;
+        }
+        
+        .stButton > button:hover {
+            background: linear-gradient(135deg, #00FF87, #04F5FF) !important;
+            color: #38003C !important;
+            transform: translateY(-3px) scale(1.02);
+            box-shadow: 0 6px 25px rgba(0, 255, 135, 0.5);
+            border-color: #38003C !important;
+        }
+        
+        .stButton > button:active {
+            transform: translateY(-1px) scale(0.98);
+        }
+        
+        /* ==================== TABS ==================== */
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 8px;
+            background-color: rgba(56, 0, 60, 0.5);
+            padding: 0.5rem;
             border-radius: 10px;
         }
+        
+        .stTabs [data-baseweb="tab"] {
+            background-color: transparent;
+            color: #00FF87;
+            border-radius: 8px;
+            font-weight: bold;
+            transition: all 0.3s ease;
+            border: 1px solid transparent;
+        }
+        
+        .stTabs [data-baseweb="tab"]:hover {
+            background-color: rgba(0, 255, 135, 0.1);
+            border-color: #00FF87;
+        }
+        
+        .stTabs [aria-selected="true"] {
+            background: linear-gradient(135deg, #00FF87, #04F5FF) !important;
+            color: #38003C !important;
+            box-shadow: 0 4px 15px rgba(0, 255, 135, 0.4);
+        }
+        
+        /* ==================== EXPANDERS ==================== */
+        .streamlit-expanderHeader {
+            background: linear-gradient(135deg, rgba(56, 0, 60, 0.8), rgba(56, 0, 60, 0.4));
+            border-radius: 10px;
+            font-weight: bold;
+            color: #00FF87 !important;
+            border: 1px solid #00FF87;
+            transition: all 0.3s ease;
+        }
+        
+        .streamlit-expanderHeader:hover {
+            background: linear-gradient(135deg, rgba(0, 255, 135, 0.2), rgba(4, 245, 255, 0.2));
+            box-shadow: 0 4px 15px rgba(0, 255, 135, 0.3);
+            transform: translateX(5px);
+        }
+        
+        /* ==================== SIDEBAR DARK THEME ==================== */
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, #38003C 0%, #1a0020 50%, #38003C 100%);
+            border-right: 2px solid #00FF87;
+        }
+        
+        [data-testid="stSidebar"] h1, 
+        [data-testid="stSidebar"] h2, 
+        [data-testid="stSidebar"] h3 {
+            color: #00FF87 !important;
+            text-shadow: 0 0 10px rgba(0, 255, 135, 0.5);
+        }
+        
+        [data-testid="stSidebar"] p, 
+        [data-testid="stSidebar"] label, 
+        [data-testid="stSidebar"] span,
+        [data-testid="stSidebar"] div {
+            color: rgba(255, 255, 255, 0.9) !important;
+        }
+        
+        [data-testid="stSidebar"] .stSelectbox > div > div,
+        [data-testid="stSidebar"] .stSelectbox label {
+            color: #00FF87 !important;
+        }
+        
+        /* ==================== DATAFRAMES & TABLES ==================== */
+        [data-testid="stDataFrame"] {
+            border: 2px solid #00FF87;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 4px 20px rgba(0, 255, 135, 0.3);
+            animation: slideUp 0.5s ease-out;
+        }
+        
+        @keyframes slideUp {
+            from { transform: translateY(30px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+        
+        [data-testid="stDataFrame"] table {
+            background-color: rgba(26, 0, 32, 0.8) !important;
+        }
+        
+        [data-testid="stDataFrame"] thead tr {
+            background: linear-gradient(135deg, #38003C, #5a0060) !important;
+        }
+        
+        [data-testid="stDataFrame"] thead th {
+            color: #00FF87 !important;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            border-bottom: 2px solid #00FF87 !important;
+        }
+        
+        [data-testid="stDataFrame"] tbody tr {
+            transition: all 0.2s ease;
+        }
+        
+        [data-testid="stDataFrame"] tbody tr:hover {
+            background-color: rgba(0, 255, 135, 0.1) !important;
+            transform: scale(1.01);
+        }
+        
+        /* ==================== TEXT AREAS & INPUTS ==================== */
+        textarea, input {
+            background-color: rgba(26, 0, 32, 0.8) !important;
+            color: #00FF87 !important;
+            border: 2px solid #38003C !important;
+            border-radius: 8px !important;
+            transition: all 0.3s ease;
+        }
+        
+        textarea:focus, input:focus {
+            border-color: #00FF87 !important;
+            box-shadow: 0 0 15px rgba(0, 255, 135, 0.4) !important;
+        }
+        
+        /* ==================== SPINNER/LOADING ==================== */
+        .stSpinner > div {
+            border-top-color: #00FF87 !important;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        /* ==================== SUCCESS/ERROR/INFO MESSAGES ==================== */
+        .stSuccess {
+            background-color: rgba(0, 255, 135, 0.2) !important;
+            border-left: 4px solid #00FF87 !important;
+            color: #00FF87 !important;
+            animation: slideInRight 0.4s ease-out;
+        }
+        
+        .stError {
+            background-color: rgba(233, 0, 82, 0.2) !important;
+            border-left: 4px solid #E90052 !important;
+            color: #E90052 !important;
+            animation: shake 0.5s ease-out;
+        }
+        
+        @keyframes shake {
+            0%, 100% { transform: translateX(0); }
+            25% { transform: translateX(-10px); }
+            75% { transform: translateX(10px); }
+        }
+        
+        .stInfo {
+            background-color: rgba(4, 245, 255, 0.2) !important;
+            border-left: 4px solid #04F5FF !important;
+            color: #04F5FF !important;
+            animation: slideInRight 0.4s ease-out;
+        }
+        
+        @keyframes slideInRight {
+            from { transform: translateX(-30px); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        
+        .stWarning {
+            background-color: rgba(255, 165, 0, 0.2) !important;
+            border-left: 4px solid #FFA500 !important;
+            animation: slideInRight 0.4s ease-out;
+        }
+        
+        /* ==================== DIVIDERS ==================== */
+        hr {
+            border-color: #00FF87 !important;
+            opacity: 0.3;
+        }
+        
+        /* ==================== CODE BLOCKS ==================== */
+        code {
+            background-color: rgba(26, 0, 32, 0.9) !important;
+            color: #04F5FF !important;
+            border: 1px solid #38003C !important;
+            border-radius: 4px;
+            padding: 2px 6px;
+        }
+        
+        pre {
+            background-color: rgba(26, 0, 32, 0.9) !important;
+            border: 2px solid #38003C !important;
+            border-radius: 8px;
+            box-shadow: 0 4px 15px rgba(0, 255, 135, 0.2);
+        }
+        
+        /* ==================== SCROLLBAR ==================== */
+        ::-webkit-scrollbar {
+            width: 12px;
+            height: 12px;
+        }
+        
+        ::-webkit-scrollbar-track {
+            background: rgba(26, 0, 32, 0.5);
+            border-radius: 10px;
+        }
+        
+        ::-webkit-scrollbar-thumb {
+            background: linear-gradient(135deg, #38003C, #00FF87);
+            border-radius: 10px;
+            transition: all 0.3s ease;
+        }
+        
+        ::-webkit-scrollbar-thumb:hover {
+            background: linear-gradient(135deg, #00FF87, #04F5FF);
+        }
+        
         </style>
     """, unsafe_allow_html=True)
     
@@ -483,25 +870,80 @@ def process_question(question: str, model_name: str, retrieval_method: str,
     # Tabs for different views
     tab1, tab2, tab3 = st.tabs(["Combined View", "Baseline Results", "Embedding Results"])
     
+    # Step 5: Show KG Context with enhanced dataframes
+    
+    # Helper for cleaner columns
+    column_config = {
+        "Player": st.column_config.TextColumn("Player", width="medium", required=True),
+        "Team": st.column_config.TextColumn("Team", width="small"),
+        "Position": st.column_config.TextColumn("Pos", width="small"),
+        "Points": st.column_config.NumberColumn(
+            "Pts",
+            help="Total FPL Points",
+            format="%d ⭐"
+        ),
+        "Goals": st.column_config.ProgressColumn(
+            "Goals",
+            help="Goals Scored",
+            format="%d",
+            min_value=0,
+            max_value=30, # Approx max goals
+        ),
+        "Assists": st.column_config.ProgressColumn(
+            "Assists",
+            help="Assists",
+            format="%d",
+            min_value=0,
+            max_value=20, # Approx max assists
+        ),
+        "Form": st.column_config.NumberColumn(
+            "Form",
+            help="Recent Form",
+            format="%.1f 🔥"
+        ),
+        "Similarity": st.column_config.ProgressColumn(
+            "Match",
+            help="Similarity Score",
+            format="%.2f",
+            min_value=0, 
+            max_value=1
+        )
+    }
+
     with tab1:
         all_players = baseline_players + embedding_players
         if all_players:
             df = format_player_dataframe(all_players)
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(
+                df, 
+                use_container_width=True,
+                column_config=column_config,
+                hide_index=True
+            )
         else:
             st.info("No players retrieved")
     
     with tab2:
         if baseline_players:
             df = format_player_dataframe(baseline_players)
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(
+                df, 
+                use_container_width=True,
+                column_config=column_config,
+                hide_index=True
+            )
         else:
             st.info("No baseline results (may be using embeddings-only mode)")
     
     with tab3:
         if embedding_players:
             df = format_player_dataframe(embedding_players)
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(
+                df, 
+                use_container_width=True,
+                column_config=column_config,
+                hide_index=True
+            )
         else:
             st.info("No embedding results (may be using baseline-only mode)")
     

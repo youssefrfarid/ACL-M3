@@ -1,0 +1,5 @@
+question_id,question,intent,model,answer,success,response_time,total_time,token_count,answer_length,error,context_length
+1,Who scored the most points in the 2023-24 season?,player_info,gemma,"I don't have that information in the available data. 
+",True,0.7595541477203369,0.7596473693847656,13,9,,815
+1,Who scored the most points in the 2023-24 season?,player_info,mistral," I don't have that information in the available data as the context only provides the points, goals, assists, and similarity for each player in the 2023-24 season, but none of them have scored any points yet.",True,3.040743112564087,3.04089093208313,52,36,,815
+1,Who scored the most points in the 2023-24 season?,player_info,phi3,Error generating response: ,False,0.205916166305542,0.20599102973937988,0,3,,815
