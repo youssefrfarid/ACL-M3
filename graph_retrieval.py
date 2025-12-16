@@ -442,11 +442,13 @@ def q_leaderboard_by_stat(session, entities: QueryEntities) -> Dict[str, Any]:
     }
     prop = stat_prop_map.get(stat, "total_points")
 
+    # Use proper field names for better context display
     cypher = f"""
     MATCH (p:Player)-[r:PLAYED_IN]->(f:Fixture {{season: $season}})
+    WITH p, SUM(r.{prop}) AS stat_value
     RETURN p.player_name AS name,
-           SUM(r.{prop}) AS value
-    ORDER BY value DESC
+           stat_value AS total_points
+    ORDER BY stat_value DESC
     LIMIT $limit
     """
 
@@ -465,7 +467,10 @@ def run_baseline_retrieval(intent: str, entities: QueryEntities) -> Dict[str, An
     with get_driver().session() as session:
         # Case 1: Player Info / Stats
         if intent == INTENT_PLAYER_INFO:
-            if entities.stat_name:
+            # Check position first - "top defenders", "best midfielders", etc.
+            if entities.position and not entities.player_names:
+                result = q_top_players_by_position(session, entities)
+            elif entities.stat_name:
                 # Specific stat requested -> leaderboard
                 result = q_leaderboard_by_stat(session, entities)
             elif entities.gameweek is not None or entities.horizon_gw is not None:
@@ -883,8 +888,12 @@ def retrieve_hybrid(
     # 1. Baseline
     baseline_ctx = run_baseline_retrieval(intent, entities)
     
-    # 2. Embedding
-    embedding_ctx = run_embedding_retrieval(query_embedding, entities, index_name, top_k)
+    # 2. Embedding (with error handling for missing index)
+    try:
+        embedding_ctx = run_embedding_retrieval(query_embedding, entities, index_name, top_k)
+    except Exception as e:
+        print(f"Warning: Embedding retrieval failed: {e}")
+        embedding_ctx = {"players": [], "mode": "embedding", "error": str(e)}
     
     # 3. Combine
     baseline_players = baseline_ctx.get("players", [])

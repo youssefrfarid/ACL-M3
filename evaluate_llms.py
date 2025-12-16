@@ -28,12 +28,26 @@ from input_processing import (
     load_hf_token
 )
 from graph_retrieval import retrieve_hybrid
-from llm_layer import generate_fpl_answer, FPLLLMInterface
+from llm_layer import (
+    generate_fpl_answer, 
+    generate_openrouter_answer,
+    load_openrouter_key,
+    FPLLLMInterface,
+    OpenRouterLLMInterface
+)
 
 
 # =====================  CONFIGURATION  =====================
 
-MODELS_TO_TEST = ["gemma", "mistral", "phi3"]
+# HuggingFace models
+HF_MODELS = ["gemma", "mistral", "phi3"]
+
+# OpenRouter models (free tier)
+OPENROUTER_MODELS = ["qwen3-coder", "llama-3.3-70b", "gemini-flash"]
+
+# Default: Test OpenRouter models
+MODELS_TO_TEST = OPENROUTER_MODELS
+
 TEST_QUESTIONS_FILE = "test_questions.json"
 RESULTS_FILE = "evaluation_results.csv"
 REPORT_FILE = "evaluation_report.md"
@@ -44,12 +58,25 @@ REPORT_FILE = "evaluation_report.md"
 class LLMEvaluator:
     """Evaluate and compare multiple LLM models"""
     
-    def __init__(self):
-        """Initialize evaluator"""
-        # Load HuggingFace token
-        self.hf_token = load_hf_token()
-        if not self.hf_token:
-            raise ValueError("HuggingFace token required. Create hf.txt")
+    def __init__(self, use_openrouter: bool = True):
+        """Initialize evaluator
+        
+        Args:
+            use_openrouter: If True, use OpenRouter models; else use HuggingFace
+        """
+        self.use_openrouter = use_openrouter
+        
+        # Load appropriate credentials
+        if use_openrouter:
+            self.api_key = load_openrouter_key()
+            if not self.api_key:
+                raise ValueError("OpenRouter API key required. Create openrouter_config.txt")
+            self.hf_token = None
+        else:
+            self.hf_token = load_hf_token()
+            if not self.hf_token:
+                raise ValueError("HuggingFace token required. Create hf.txt")
+            self.api_key = None
         
         # Load players and teams
         print("Loading FPL data from Neo4j...")
@@ -97,14 +124,24 @@ class LLMEvaluator:
                 top_k=10
             )
             
-            # Step 3: Generate answer
+            # Step 3: Generate answer (use appropriate provider)
             start_time = time.time()
-            result = generate_fpl_answer(
-                question=question,
-                hybrid_results=hybrid_results,
-                model_name=model_name,
-                hf_token=self.hf_token
-            )
+            
+            if self.use_openrouter:
+                result = generate_openrouter_answer(
+                    question=question,
+                    hybrid_results=hybrid_results,
+                    model_name=model_name,
+                    api_key=self.api_key
+                )
+            else:
+                result = generate_fpl_answer(
+                    question=question,
+                    hybrid_results=hybrid_results,
+                    model_name=model_name,
+                    hf_token=self.hf_token
+                )
+            
             total_time = time.time() - start_time
             
             # Compile results
@@ -113,11 +150,14 @@ class LLMEvaluator:
                 "question": question,
                 "intent": intent,
                 "model": model_name,
+                "provider": "openrouter" if self.use_openrouter else "huggingface",
                 "answer": result["answer"],
                 "success": result["success"],
                 "response_time": result["response_time"],
                 "total_time": total_time,
                 "token_count": result["token_count"],
+                "prompt_tokens": result.get("prompt_tokens", 0),
+                "completion_tokens": result.get("completion_tokens", 0),
                 "answer_length": len(result["answer"].split()),
                 "error": result.get("error"),
                 "context_length": len(result.get("context", "")),
@@ -129,6 +169,7 @@ class LLMEvaluator:
                 "question_id": question_data["id"],
                 "question": question,
                 "model": model_name,
+                "provider": "openrouter" if self.use_openrouter else "huggingface",
                 "success": False,
                 "error": str(e),
                 "answer": "",

@@ -30,7 +30,12 @@ from input_processing import (
     load_hf_token
 )
 from graph_retrieval import retrieve_hybrid
-from llm_layer import generate_fpl_answer
+from llm_layer import (
+    generate_fpl_answer, 
+    generate_openrouter_answer,
+    load_openrouter_key,
+    OpenRouterLLMInterface
+)
 
 
 # =====================  CONFIGURATION  =====================
@@ -47,6 +52,13 @@ AVAILABLE_MODELS = {
     "Gemma 2B (Fast)": "gemma",
     "Mistral 7B (High Quality)": "mistral",
     "Phi-3 Mini (Balanced)": "phi3"
+}
+
+# OpenRouter models (free tier)
+OPENROUTER_MODELS = {
+    "Qwen3 Coder (Fast)": "qwen3-coder",
+    "Llama 3.3 70B (Large)": "llama-3.3-70b",
+    "Gemini 2.0 Flash (Balanced)": "gemini-flash"
 }
 
 RETRIEVAL_METHODS = {
@@ -315,14 +327,16 @@ def format_player_dataframe(players: List[Dict[str, Any]]) -> pd.DataFrame:
         if "season" in p and p["season"]:
             row["Season"] = p["season"]
         
-        # Stats fields
-        if "total_points" in p:
-            row["Points"] = int(p["total_points"]) if p["total_points"] else 0
+        # Stats fields - check multiple possible keys
+        # Points (could be total_points, points, or value depending on query)
+        points = p.get("total_points") or p.get("points") or p.get("value")
+        if points is not None:
+            row["Points"] = int(points) if points else 0
         
-        if "goals" in p:
-            row["Goals"] = int(p["goals"]) if p["goals"] else 0
-        elif "goals_scored" in p:
-            row["Goals"] = int(p["goals_scored"]) if p["goals_scored"] else 0
+        # Goals (could be goals or goals_scored)
+        goals = p.get("goals") or p.get("goals_scored")
+        if goals is not None:
+            row["Goals"] = int(goals) if goals else 0
         
         if "assists" in p:
             row["Assists"] = int(p["assists"]) if p["assists"] else 0
@@ -360,240 +374,195 @@ def format_player_dataframe(players: List[Dict[str, Any]]) -> pd.DataFrame:
 def main():
     """Main Streamlit application."""
     
-    # Custom CSS for FPL Dark Theme with Animations
+    # Custom CSS for FPL Theme with Football Pitch Background
     st.markdown("""
         <style>
-        /* ==================== FPL OFFICIAL COLORS ==================== */
+        /* ==================== FPL COLORS (Toned Down) ==================== */
         /* Primary: #38003C (Dark Purple)
-           Accent 1: #00FF87 (Neon Green)
-           Accent 2: #E90052 (Magenta Pink)
-           Accent 3: #04F5FF (Cyan Blue) */
+           Accent 1: #2ECC71 (Softer Green)
+           Accent 2: #C0392B (Softer Red)
+           Accent 3: #3498DB (Softer Blue) */
         
-        /* ==================== GLOBAL DARK THEME ==================== */
+        /* ==================== FOOTBALL PITCH BACKGROUND ==================== */
         .stApp {
-            background: linear-gradient(135deg, #1a0020 0%, #2d1b3d 50%, #1a0020 100%);
+            background: 
+                /* Center circle */
+                radial-gradient(circle at 50% 50%, transparent 8%, rgba(255, 255, 255, 0.08) 8.5%, rgba(255, 255, 255, 0.08) 9%, transparent 9.5%),
+                /* Penalty box top */
+                linear-gradient(to bottom, transparent 10%, rgba(255, 255, 255, 0.06) 10.2%, rgba(255, 255, 255, 0.06) 10.4%, transparent 10.6%),
+                /* Halfway line */
+                linear-gradient(to bottom, transparent 49.8%, rgba(255, 255, 255, 0.1) 50%, rgba(255, 255, 255, 0.1) 50.2%, transparent 50.4%),
+                /* Penalty box bottom */
+                linear-gradient(to bottom, transparent 89.4%, rgba(255, 255, 255, 0.06) 89.6%, rgba(255, 255, 255, 0.06) 89.8%, transparent 90%),
+                /* Grass stripe pattern */
+                repeating-linear-gradient(
+                    90deg,
+                    #1a5c2e 0px,
+                    #1a5c2e 80px,
+                    #166b32 80px,
+                    #166b32 160px
+                );
             background-attachment: fixed;
         }
         
         /* Main content area */
         .main .block-container {
-            background-color: rgba(26, 0, 32, 0.6);
-            border-radius: 15px;
+            background: rgba(20, 60, 30, 0.92);
+            border-radius: 16px;
             padding: 2rem;
-            backdrop-filter: blur(10px);
-            animation: fadeIn 0.5s ease-in;
+            backdrop-filter: blur(8px);
+            border: 2px solid rgba(255, 255, 255, 0.15);
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
         }
         
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(20px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        
-        /* ==================== ANIMATED HEADER ==================== */
+        /* ==================== HEADER ==================== */
         .main-header {
             font-family: 'Arial Black', sans-serif;
-            font-size: 3.5rem;
+            font-size: 3rem;
             font-weight: 900;
             text-align: center;
             margin-bottom: 0.5rem;
             text-transform: uppercase;
             letter-spacing: 2px;
-            background: linear-gradient(90deg, #00FF87, #04F5FF, #E90052, #00FF87);
-            background-size: 300% 100%;
+            background: linear-gradient(90deg, #FFD700, #FFFFFF, #FFD700);
+            background-size: 200% 100%;
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
-            animation: gradientFlow 3s ease infinite;
-            text-shadow: 0 0 30px rgba(0, 255, 135, 0.3);
+            animation: shimmer 3s ease infinite;
         }
         
-        @keyframes gradientFlow {
+        @keyframes shimmer {
             0%, 100% { background-position: 0% 50%; }
             50% { background-position: 100% 50%; }
         }
         
         .sub-header {
             font-family: 'Arial', sans-serif;
-            font-size: 1.4rem;
-            color: #00FF87;
+            font-size: 1.2rem;
+            color: #FFFFFF;
             text-align: center;
             margin-bottom: 2rem;
             font-weight: 500;
-            animation: pulse 2s ease-in-out infinite;
+            opacity: 0.9;
         }
         
-        @keyframes pulse {
-            0%, 100% { opacity: 1; }
-            50% { opacity: 0.7; }
-        }
-        
-        /* ==================== METRIC CARDS ==================== */
+        /* ==================== METRICS (Scoreboard Style) ==================== */
         [data-testid="stMetricValue"] {
             font-size: 2rem;
-            font-weight: bold;
-            background: linear-gradient(135deg, #00FF87, #04F5FF);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            animation: scaleIn 0.4s ease-out;
-        }
-        
-        @keyframes scaleIn {
-            from { transform: scale(0.8); opacity: 0; }
-            to { transform: scale(1); opacity: 1; }
+            font-weight: 900;
+            color: #FFD700 !important;
+            font-family: 'Arial Black', sans-serif;
         }
         
         [data-testid="stMetricLabel"] {
             font-weight: bold;
-            color: #E90052;
+            color: #FFFFFF !important;
             text-transform: uppercase;
             letter-spacing: 1px;
             font-size: 0.85rem;
         }
         
         div[data-testid="metric-container"] {
-            background: linear-gradient(135deg, rgba(56, 0, 60, 0.8), rgba(56, 0, 60, 0.4));
-            border: 2px solid #00FF87;
+            background: rgba(56, 0, 60, 0.85);
+            border: 2px solid rgba(255, 215, 0, 0.5);
             border-radius: 12px;
             padding: 1rem;
-            box-shadow: 0 4px 20px rgba(0, 255, 135, 0.2);
-            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+            transition: transform 0.2s ease;
         }
         
         div[data-testid="metric-container"]:hover {
-            transform: translateY(-5px);
-            box-shadow: 0 8px 30px rgba(0, 255, 135, 0.4);
-            border-color: #04F5FF;
+            transform: translateY(-3px);
         }
         
         /* ==================== BUTTONS ==================== */
         .stButton > button {
             background: linear-gradient(135deg, #38003C, #5a0060) !important;
-            color: #00FF87 !important;
-            border: 2px solid #00FF87 !important;
+            color: #FFFFFF !important;
+            border: 2px solid #FFD700 !important;
             border-radius: 10px;
             font-weight: bold;
             font-size: 1rem;
             padding: 0.6rem 1.2rem;
-            transition: all 0.3s ease;
-            box-shadow: 0 4px 15px rgba(0, 255, 135, 0.3);
-            position: relative;
-            overflow: hidden;
-        }
-        
-        .stButton > button:before {
-            content: '';
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            width: 0;
-            height: 0;
-            border-radius: 50%;
-            background: rgba(0, 255, 135, 0.3);
-            transform: translate(-50%, -50%);
-            transition: width 0.6s, height 0.6s;
-        }
-        
-        .stButton > button:hover:before {
-            width: 300px;
-            height: 300px;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
         }
         
         .stButton > button:hover {
-            background: linear-gradient(135deg, #00FF87, #04F5FF) !important;
+            background: linear-gradient(135deg, #FFD700, #FFA500) !important;
             color: #38003C !important;
-            transform: translateY(-3px) scale(1.02);
-            box-shadow: 0 6px 25px rgba(0, 255, 135, 0.5);
+            transform: translateY(-2px);
             border-color: #38003C !important;
-        }
-        
-        .stButton > button:active {
-            transform: translateY(-1px) scale(0.98);
         }
         
         /* ==================== TABS ==================== */
         .stTabs [data-baseweb="tab-list"] {
             gap: 8px;
-            background-color: rgba(56, 0, 60, 0.5);
+            background: rgba(56, 0, 60, 0.6);
             padding: 0.5rem;
             border-radius: 10px;
         }
         
         .stTabs [data-baseweb="tab"] {
             background-color: transparent;
-            color: #00FF87;
+            color: #FFFFFF;
             border-radius: 8px;
             font-weight: bold;
-            transition: all 0.3s ease;
-            border: 1px solid transparent;
+            transition: all 0.2s ease;
         }
         
         .stTabs [data-baseweb="tab"]:hover {
-            background-color: rgba(0, 255, 135, 0.1);
-            border-color: #00FF87;
+            background-color: rgba(255, 215, 0, 0.2);
         }
         
         .stTabs [aria-selected="true"] {
-            background: linear-gradient(135deg, #00FF87, #04F5FF) !important;
+            background: linear-gradient(135deg, #FFD700, #FFA500) !important;
             color: #38003C !important;
-            box-shadow: 0 4px 15px rgba(0, 255, 135, 0.4);
         }
         
         /* ==================== EXPANDERS ==================== */
         .streamlit-expanderHeader {
-            background: linear-gradient(135deg, rgba(56, 0, 60, 0.8), rgba(56, 0, 60, 0.4));
+            background: rgba(56, 0, 60, 0.8);
             border-radius: 10px;
             font-weight: bold;
-            color: #00FF87 !important;
-            border: 1px solid #00FF87;
-            transition: all 0.3s ease;
+            color: #FFFFFF !important;
+            border: 1px solid rgba(255, 215, 0, 0.4);
         }
         
         .streamlit-expanderHeader:hover {
-            background: linear-gradient(135deg, rgba(0, 255, 135, 0.2), rgba(4, 245, 255, 0.2));
-            box-shadow: 0 4px 15px rgba(0, 255, 135, 0.3);
-            transform: translateX(5px);
+            background: rgba(56, 0, 60, 0.95);
         }
         
-        /* ==================== SIDEBAR DARK THEME ==================== */
+        /* ==================== SIDEBAR ==================== */
         [data-testid="stSidebar"] {
-            background: linear-gradient(180deg, #38003C 0%, #1a0020 50%, #38003C 100%);
-            border-right: 2px solid #00FF87;
+            background: linear-gradient(180deg, #38003C 0%, #2d0030 50%, #38003C 100%);
+            border-right: 3px solid #FFD700;
         }
         
         [data-testid="stSidebar"] h1, 
         [data-testid="stSidebar"] h2, 
         [data-testid="stSidebar"] h3 {
-            color: #00FF87 !important;
-            text-shadow: 0 0 10px rgba(0, 255, 135, 0.5);
+            color: #FFD700 !important;
+            font-family: 'Arial Black', sans-serif;
         }
         
         [data-testid="stSidebar"] p, 
         [data-testid="stSidebar"] label, 
         [data-testid="stSidebar"] span,
         [data-testid="stSidebar"] div {
-            color: rgba(255, 255, 255, 0.9) !important;
+            color: rgba(255, 255, 255, 0.95) !important;
         }
         
-        [data-testid="stSidebar"] .stSelectbox > div > div,
-        [data-testid="stSidebar"] .stSelectbox label {
-            color: #00FF87 !important;
-        }
-        
-        /* ==================== DATAFRAMES & TABLES ==================== */
+        /* ==================== DATAFRAMES (League Table Style) ==================== */
         [data-testid="stDataFrame"] {
-            border: 2px solid #00FF87;
+            border: 2px solid #FFD700;
             border-radius: 10px;
             overflow: hidden;
-            box-shadow: 0 4px 20px rgba(0, 255, 135, 0.3);
-            animation: slideUp 0.5s ease-out;
-        }
-        
-        @keyframes slideUp {
-            from { transform: translateY(30px); opacity: 0; }
-            to { transform: translateY(0); opacity: 1; }
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.4);
         }
         
         [data-testid="stDataFrame"] table {
-            background-color: rgba(26, 0, 32, 0.8) !important;
+            background-color: rgba(56, 0, 60, 0.9) !important;
         }
         
         [data-testid="stDataFrame"] thead tr {
@@ -601,135 +570,127 @@ def main():
         }
         
         [data-testid="stDataFrame"] thead th {
-            color: #00FF87 !important;
+            color: #FFD700 !important;
             font-weight: bold;
             text-transform: uppercase;
             letter-spacing: 1px;
-            border-bottom: 2px solid #00FF87 !important;
+            border-bottom: 2px solid #FFD700 !important;
         }
         
         [data-testid="stDataFrame"] tbody tr {
-            transition: all 0.2s ease;
+            color: #FFFFFF !important;
         }
         
         [data-testid="stDataFrame"] tbody tr:hover {
-            background-color: rgba(0, 255, 135, 0.1) !important;
-            transform: scale(1.01);
+            background-color: rgba(255, 215, 0, 0.1) !important;
         }
         
-        /* ==================== TEXT AREAS & INPUTS ==================== */
+        /* ==================== TEXT INPUTS ==================== */
         textarea, input {
-            background-color: rgba(26, 0, 32, 0.8) !important;
-            color: #00FF87 !important;
-            border: 2px solid #38003C !important;
+            background-color: rgba(56, 0, 60, 0.8) !important;
+            color: #FFFFFF !important;
+            border: 2px solid rgba(255, 215, 0, 0.4) !important;
             border-radius: 8px !important;
-            transition: all 0.3s ease;
         }
         
         textarea:focus, input:focus {
-            border-color: #00FF87 !important;
-            box-shadow: 0 0 15px rgba(0, 255, 135, 0.4) !important;
+            border-color: #FFD700 !important;
+            box-shadow: 0 0 10px rgba(255, 215, 0, 0.3) !important;
         }
         
-        /* ==================== SPINNER/LOADING ==================== */
-        .stSpinner > div {
-            border-top-color: #00FF87 !important;
-            animation: spin 1s linear infinite;
-        }
-        
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-        
-        /* ==================== SUCCESS/ERROR/INFO MESSAGES ==================== */
+        /* ==================== MESSAGES ==================== */
         .stSuccess {
-            background-color: rgba(0, 255, 135, 0.2) !important;
-            border-left: 4px solid #00FF87 !important;
-            color: #00FF87 !important;
-            animation: slideInRight 0.4s ease-out;
+            background-color: rgba(46, 204, 113, 0.2) !important;
+            border-left: 4px solid #2ECC71 !important;
+            color: #FFFFFF !important;
         }
         
         .stError {
-            background-color: rgba(233, 0, 82, 0.2) !important;
-            border-left: 4px solid #E90052 !important;
-            color: #E90052 !important;
-            animation: shake 0.5s ease-out;
-        }
-        
-        @keyframes shake {
-            0%, 100% { transform: translateX(0); }
-            25% { transform: translateX(-10px); }
-            75% { transform: translateX(10px); }
+            background-color: rgba(231, 76, 60, 0.2) !important;
+            border-left: 4px solid #E74C3C !important;
+            color: #FFFFFF !important;
         }
         
         .stInfo {
-            background-color: rgba(4, 245, 255, 0.2) !important;
-            border-left: 4px solid #04F5FF !important;
-            color: #04F5FF !important;
-            animation: slideInRight 0.4s ease-out;
-        }
-        
-        @keyframes slideInRight {
-            from { transform: translateX(-30px); opacity: 0; }
-            to { transform: translateX(0); opacity: 1; }
+            background-color: rgba(52, 152, 219, 0.2) !important;
+            border-left: 4px solid #3498DB !important;
+            color: #FFFFFF !important;
         }
         
         .stWarning {
-            background-color: rgba(255, 165, 0, 0.2) !important;
-            border-left: 4px solid #FFA500 !important;
-            animation: slideInRight 0.4s ease-out;
+            background-color: rgba(241, 196, 15, 0.2) !important;
+            border-left: 4px solid #F1C40F !important;
+            color: #FFFFFF !important;
         }
         
         /* ==================== DIVIDERS ==================== */
         hr {
-            border-color: #00FF87 !important;
-            opacity: 0.3;
+            border: none !important;
+            height: 2px !important;
+            background: linear-gradient(90deg, transparent, #FFD700, transparent) !important;
+            margin: 1.5rem 0 !important;
         }
         
         /* ==================== CODE BLOCKS ==================== */
         code {
-            background-color: rgba(26, 0, 32, 0.9) !important;
-            color: #04F5FF !important;
+            background-color: rgba(56, 0, 60, 0.9) !important;
+            color: #3498DB !important;
             border: 1px solid #38003C !important;
             border-radius: 4px;
             padding: 2px 6px;
         }
         
         pre {
-            background-color: rgba(26, 0, 32, 0.9) !important;
+            background-color: rgba(56, 0, 60, 0.9) !important;
             border: 2px solid #38003C !important;
             border-radius: 8px;
-            box-shadow: 0 4px 15px rgba(0, 255, 135, 0.2);
         }
         
         /* ==================== SCROLLBAR ==================== */
         ::-webkit-scrollbar {
-            width: 12px;
-            height: 12px;
+            width: 10px;
+            height: 10px;
         }
         
         ::-webkit-scrollbar-track {
-            background: rgba(26, 0, 32, 0.5);
-            border-radius: 10px;
+            background: rgba(56, 0, 60, 0.5);
+            border-radius: 8px;
         }
         
         ::-webkit-scrollbar-thumb {
-            background: linear-gradient(135deg, #38003C, #00FF87);
-            border-radius: 10px;
-            transition: all 0.3s ease;
+            background: linear-gradient(180deg, #38003C, #FFD700);
+            border-radius: 8px;
         }
         
-        ::-webkit-scrollbar-thumb:hover {
-            background: linear-gradient(135deg, #00FF87, #04F5FF);
+        /* ==================== SELECT BOXES ==================== */
+        .stSelectbox > div > div {
+            background: rgba(56, 0, 60, 0.8) !important;
+            border: 2px solid rgba(255, 215, 0, 0.4) !important;
+            border-radius: 8px !important;
+            color: #FFFFFF !important;
+        }
+        
+        /* ==================== GENERAL TEXT ==================== */
+        h1, h2, h3, h4, h5, h6 {
+            color: #FFD700 !important;
+        }
+        
+        p, span, label {
+            color: #FFFFFF !important;
+        }
+        
+        /* ==================== SPINNER ==================== */
+        .stSpinner > div {
+            border-top-color: #FFD700 !important;
         }
         
         </style>
     """, unsafe_allow_html=True)
     
-    # Header
-    st.markdown('<p class="main-header">⚽ FPL Graph-RAG System</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Knowledge Graph-powered Fantasy Premier League Assistant</p>', unsafe_allow_html=True)
+    
+    # Header with football icons
+    st.markdown('<p class="main-header">⚽ FPL Graph-RAG System 🏆</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">🥅 Your AI-Powered Fantasy Premier League Assistant | Powered by Knowledge Graphs ⚡</p>', unsafe_allow_html=True)
     
     # Initialize session state
     if 'history' not in st.session_state:
@@ -740,18 +701,39 @@ def main():
         st.session_state.teams = None
     if 'hf_token' not in st.session_state:
         st.session_state.hf_token = None
+    if 'openrouter_key' not in st.session_state:
+        st.session_state.openrouter_key = None
+    if 'comparison_results' not in st.session_state:
+        st.session_state.comparison_results = []
     
     # Sidebar configuration
     with st.sidebar:
-        st.header("⚙️ Configuration")
+        st.header("🎮 Match Settings")
         
-        # Model selection
-        selected_model_name = st.selectbox(
-            "Select LLM Model",
-            options=list(AVAILABLE_MODELS.keys()),
-            help="Choose which language model to use for generating answers"
+        # Model provider selection
+        model_provider = st.radio(
+            "Model Provider",
+            options=["OpenRouter (Recommended)", "HuggingFace"],
+            help="OpenRouter provides free access to powerful models"
         )
-        model_name = AVAILABLE_MODELS[selected_model_name]
+        
+        # Model selection based on provider
+        if model_provider == "OpenRouter (Recommended)":
+            selected_model_name = st.selectbox(
+                "Select LLM Model",
+                options=list(OPENROUTER_MODELS.keys()),
+                help="Choose which OpenRouter model to use"
+            )
+            model_name = OPENROUTER_MODELS[selected_model_name]
+            use_openrouter = True
+        else:
+            selected_model_name = st.selectbox(
+                "Select LLM Model",
+                options=list(AVAILABLE_MODELS.keys()),
+                help="Choose which HuggingFace model to use"
+            )
+            model_name = AVAILABLE_MODELS[selected_model_name]
+            use_openrouter = False
         
         # Retrieval method
         selected_retrieval_name = st.selectbox(
@@ -761,10 +743,37 @@ def main():
         )
         retrieval_method = RETRIEVAL_METHODS[selected_retrieval_name]
         
+        # Embedding model selection (for embedding/hybrid modes)
+        EMBEDDING_MODELS = {
+            "MiniLM-L6 (Default)": "player_embedding_index_minilm",
+            "Paraphrase-MiniLM": "player_embedding_index_para"
+        }
+        if retrieval_method in ["embeddings", "hybrid"]:
+            selected_embedding_model = st.selectbox(
+                "Embedding Model",
+                options=list(EMBEDDING_MODELS.keys()),
+                help="Choose which embedding model to use for semantic search"
+            )
+            embedding_index = EMBEDDING_MODELS[selected_embedding_model]
+        else:
+            embedding_index = "player_embedding_index_minilm"  # Default
+        
+        # Store in session state for use in process_question
+        st.session_state["embedding_index"] = embedding_index
+        
+        st.divider()
+        
+        # Model comparison mode
+        st.header("🏟️ Head-to-Head")
+        compare_models = st.checkbox(
+            "Compare All OpenRouter Models",
+            help="Run the same question through all 3 OpenRouter models and compare results"
+        )
+        
         st.divider()
         
         # Example questions
-        st.header("💡 Example Questions")
+        st.header("⚽ Quick Picks")
         for example in EXAMPLE_QUESTIONS:
             st.button(
                 example, 
@@ -778,7 +787,7 @@ def main():
         
         # Query history
         if st.session_state.history:
-            st.header("📜 History")
+            st.header("🏅 Match History")
             for i, item in enumerate(reversed(st.session_state.history[-5:])):
                 with st.expander(f"Q: {item['question'][:40]}..."):
                     st.write(f"**Model:** {item['model']}")
@@ -790,9 +799,10 @@ def main():
         with st.spinner("Loading FPL data from Neo4j..."):
             try:
                 st.session_state.hf_token = load_hf_token()
-                if not st.session_state.hf_token:
-                    st.error("❌ HuggingFace token not found. Please create hf.txt with your token.")
-                    st.stop()
+                st.session_state.openrouter_key = load_openrouter_key()
+                
+                if not st.session_state.openrouter_key:
+                    st.warning("⚠️ OpenRouter key not found. Create openrouter_config.txt for OpenRouter models.")
                 
                 players, teams = load_known_players_and_teams()
                 st.session_state.players = players
@@ -803,8 +813,39 @@ def main():
                 st.info("Make sure Neo4j is running and config.txt is configured.")
                 st.stop()
     
+    # Batch Evaluation Section
+    with st.expander("🏆 Tournament Mode (Multiple Prompts)", expanded=False):
+        st.markdown("Run multiple test questions through all OpenRouter models for comprehensive comparison.")
+        
+        # Predefined test questions (using 2022-23 season - the latest in the data)
+        test_questions = [
+            "Who scored the most points in 2022-23?",
+            "Compare Salah and Haaland in 2022-23",
+            "Recommend a midfielder under 8 million",
+            "Which team has the best defense in 2022-23?",
+            "Top 5 defenders by points in 2022-23"
+        ]
+        
+        st.caption(f"Test Questions: {len(test_questions)}")
+        with st.expander("View Test Questions"):
+            for i, q in enumerate(test_questions, 1):
+                st.markdown(f"{i}. {q}")
+        
+        if st.button("🚀 Run Batch Evaluation", use_container_width=True):
+            if not st.session_state.openrouter_key:
+                st.error("OpenRouter API key required for batch evaluation")
+            else:
+                run_batch_evaluation(
+                    test_questions, 
+                    st.session_state.players, 
+                    st.session_state.teams, 
+                    st.session_state.openrouter_key
+                )
+    
+    st.divider()
+    
     # Main question input
-    st.header("🤔 Ask a Question")
+    st.header("🎙️ Ask Your Manager")
     
     question = st.text_area(
         "Enter your FPL question:",
@@ -814,7 +855,7 @@ def main():
     )
     
     # Ask button
-    if st.button("🔍 Ask Question", type="primary", use_container_width=True):
+    if st.button("⚽ Kick Off!", type="primary", use_container_width=True):
         if not question.strip():
             st.warning("⚠️ Please enter a question first")
         else:
@@ -824,12 +865,395 @@ def main():
                 retrieval_method=retrieval_method,
                 players=st.session_state.players,
                 teams=st.session_state.teams,
-                hf_token=st.session_state.hf_token
+                hf_token=st.session_state.hf_token,
+                use_openrouter=use_openrouter,
+                openrouter_key=st.session_state.openrouter_key,
+                compare_models=compare_models
             )
 
 
+def run_batch_evaluation(test_questions: List[str], players: List[str], 
+                        teams: List[str], openrouter_key: str):
+    """Run batch evaluation across all OpenRouter models and display results."""
+    
+    st.header("🧪 Batch Evaluation Results")
+    
+    all_results = []
+    total_evals = len(test_questions) * len(OPENROUTER_MODELS)
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    current_eval = 0
+    
+    for q_idx, question in enumerate(test_questions):
+        # Process question once for retrieval
+        status_text.text(f"Processing Q{q_idx+1}: {question[:40]}...")
+        
+        intent = classify_intent(question)
+        entities = extract_entities(question, players, teams)
+        query_embedding = get_query_embedding(question)
+        
+        # Get selected embedding index from session state
+        embedding_index = st.session_state.get("embedding_index", "player_embedding_index_minilm")
+        hybrid_results = retrieve_hybrid(
+            intent=intent,
+            entities=entities,
+            query_embedding=query_embedding,
+            index_name=embedding_index,
+            top_k=10
+        )
+        
+        for model_key in OPENROUTER_MODELS.values():
+            current_eval += 1
+            progress_bar.progress(current_eval / total_evals)
+            status_text.text(f"Q{q_idx+1} / Model: {model_key}...")
+            
+            try:
+                result = generate_openrouter_answer(
+                    question=question,
+                    hybrid_results=hybrid_results,
+                    model_name=model_key,
+                    api_key=openrouter_key
+                )
+                
+                all_results.append({
+                    'Question ID': q_idx + 1,
+                    'Question': question,
+                    'Model': model_key,
+                    'Success': result.get('success', False),
+                    'Response Time (s)': round(result.get('response_time', 0), 2),
+                    'Prompt Tokens': result.get('prompt_tokens', 0),
+                    'Completion Tokens': result.get('completion_tokens', 0),
+                    'Total Tokens': result.get('token_count', 0),
+                    'Answer Length (words)': len(result.get('answer', '').split()),
+                    'Answer': result.get('answer', ''),
+                    'Error': result.get('error', '')
+                })
+            
+            except Exception as e:
+                all_results.append({
+                    'Question ID': q_idx + 1,
+                    'Question': question,
+                    'Model': model_key,
+                    'Success': False,
+                    'Response Time (s)': 0,
+                    'Prompt Tokens': 0,
+                    'Completion Tokens': 0,
+                    'Total Tokens': 0,
+                    'Answer Length (words)': 0,
+                    'Answer': '',
+                    'Error': str(e)
+                })
+    
+    progress_bar.empty()
+    status_text.empty()
+    
+    # Create results DataFrame
+    results_df = pd.DataFrame(all_results)
+    
+    # Create tabs for different views
+    tab1, tab2, tab3 = st.tabs(["📊 Summary", "📋 Detailed Results", "📥 Export"])
+    
+    with tab1:
+        st.subheader("Aggregate Metrics by Model")
+        
+        # Calculate aggregate metrics
+        agg_data = []
+        for model in OPENROUTER_MODELS.values():
+            model_df = results_df[results_df['Model'] == model]
+            success_df = model_df[model_df['Success'] == True]
+            
+            agg_data.append({
+                'Model': model,
+                'Success Rate': f"{(len(success_df) / len(model_df) * 100):.1f}%",
+                'Avg Response Time (s)': f"{success_df['Response Time (s)'].mean():.2f}",
+                'Avg Prompt Tokens': int(success_df['Prompt Tokens'].mean()) if len(success_df) > 0 else 0,
+                'Avg Completion Tokens': int(success_df['Completion Tokens'].mean()) if len(success_df) > 0 else 0,
+                'Avg Total Tokens': int(success_df['Total Tokens'].mean()) if len(success_df) > 0 else 0,
+                'Avg Answer Length': int(success_df['Answer Length (words)'].mean()) if len(success_df) > 0 else 0
+            })
+        
+        agg_df = pd.DataFrame(agg_data)
+        st.dataframe(agg_df, use_container_width=True, hide_index=True)
+        
+        # Charts
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Average Response Time")
+            models = [m.split('/')[-1].split(':')[0] for m in OPENROUTER_MODELS.values()]
+            times = [results_df[results_df['Model'] == m]['Response Time (s)'].mean() 
+                    for m in OPENROUTER_MODELS.values()]
+            
+            fig = go.Figure(data=[go.Bar(
+                x=models, y=times,
+                marker_color=['#00FF87', '#04F5FF', '#E90052'],
+                text=[f"{t:.2f}s" for t in times],
+                textposition='outside'
+            )])
+            fig.update_layout(
+                yaxis_title="Seconds",
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                font=dict(color='white'),
+                height=350
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            st.subheader("Average Token Usage")
+            prompt_tokens = [results_df[results_df['Model'] == m]['Prompt Tokens'].mean() 
+                           for m in OPENROUTER_MODELS.values()]
+            completion_tokens = [results_df[results_df['Model'] == m]['Completion Tokens'].mean() 
+                               for m in OPENROUTER_MODELS.values()]
+            
+            fig = go.Figure(data=[
+                go.Bar(name='Prompt', x=models, y=prompt_tokens, marker_color='#00FF87'),
+                go.Bar(name='Completion', x=models, y=completion_tokens, marker_color='#E90052')
+            ])
+            fig.update_layout(
+                barmode='stack',
+                yaxis_title="Tokens",
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                font=dict(color='white'),
+                height=350,
+                legend=dict(orientation='h', yanchor='bottom', y=1.02)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+    
+    with tab2:
+        st.subheader("All Evaluation Results")
+        
+        # Display results without the long answer column
+        display_df = results_df[['Question ID', 'Model', 'Success', 'Response Time (s)', 
+                                'Total Tokens', 'Answer Length (words)']].copy()
+        st.dataframe(display_df, use_container_width=True, hide_index=True)
+        
+        # Show individual answers in expanders
+        st.subheader("Individual Answers")
+        for q_id in results_df['Question ID'].unique():
+            q_results = results_df[results_df['Question ID'] == q_id]
+            question = q_results.iloc[0]['Question']
+            
+            with st.expander(f"Q{q_id}: {question[:60]}..."):
+                cols = st.columns(len(OPENROUTER_MODELS))
+                for idx, (col, model) in enumerate(zip(cols, OPENROUTER_MODELS.values())):
+                    with col:
+                        model_result = q_results[q_results['Model'] == model].iloc[0]
+                        st.markdown(f"**{model.split('/')[-1]}**")
+                        if model_result['Success']:
+                            st.success(model_result['Answer'][:500] + "..." if len(model_result['Answer']) > 500 else model_result['Answer'])
+                        else:
+                            st.error(f"Failed: {model_result['Error']}")
+                        st.caption(f"⏱️ {model_result['Response Time (s)']}s | 🔢 {model_result['Total Tokens']} tokens")
+    
+    with tab3:
+        st.subheader("Export Batch Evaluation Results")
+        
+        # CSV download
+        csv = results_df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Full Results (CSV)",
+            data=csv,
+            file_name=f"batch_evaluation_{int(time.time())}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+        
+        # Summary CSV
+        summary_csv = agg_df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download Summary (CSV)",
+            data=summary_csv,
+            file_name=f"batch_summary_{int(time.time())}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+        
+        st.info(f"✅ Batch evaluation complete: {len(test_questions)} questions × {len(OPENROUTER_MODELS)} models = {len(all_results)} evaluations")
+
+
+def display_model_comparison(question: str, hybrid_results: Dict[str, Any], 
+                            openrouter_key: str, retrieval_method: str, start_time: float):
+    """Run all OpenRouter models and display comparison."""
+    
+    st.header("📊 Model Comparison")
+    st.caption("Running the same query through all 3 OpenRouter models...")
+    
+    # Run all models
+    comparison_results = []
+    model_names = list(OPENROUTER_MODELS.values())
+    model_display_names = list(OPENROUTER_MODELS.keys())
+    
+    progress_bar = st.progress(0)
+    
+    for idx, (display_name, model_key) in enumerate(OPENROUTER_MODELS.items()):
+        progress_bar.progress((idx + 1) / len(OPENROUTER_MODELS), f"Testing {display_name}...")
+        
+        try:
+            result = generate_openrouter_answer(
+                question=question,
+                hybrid_results=hybrid_results,
+                model_name=model_key,
+                api_key=openrouter_key
+            )
+            result['display_name'] = display_name
+            result['model_key'] = model_key
+            comparison_results.append(result)
+        except Exception as e:
+            comparison_results.append({
+                'display_name': display_name,
+                'model_key': model_key,
+                'success': False,
+                'error': str(e),
+                'response_time': 0,
+                'token_count': 0,
+                'prompt_tokens': 0,
+                'completion_tokens': 0,
+                'answer': f"Error: {e}"
+            })
+    
+    progress_bar.empty()
+    
+    # Store results for export
+    st.session_state.comparison_results = comparison_results
+    
+    # Create tabs for different views
+    tab1, tab2, tab3 = st.tabs(["📈 Quantitative", "💬 Qualitative", "📥 Export"])
+    
+    with tab1:
+        st.subheader("Quantitative Metrics")
+        
+        # Build metrics dataframe
+        metrics_data = []
+        for r in comparison_results:
+            metrics_data.append({
+                'Model': r['display_name'],
+                'Response Time (s)': f"{r.get('response_time', 0):.2f}",
+                'Prompt Tokens': r.get('prompt_tokens', 0),
+                'Completion Tokens': r.get('completion_tokens', 0),
+                'Total Tokens': r.get('token_count', 0),
+                'Success': '✅' if r.get('success') else '❌'
+            })
+        
+        metrics_df = pd.DataFrame(metrics_data)
+        st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+        
+        # Charts
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Response Time Chart
+            st.subheader("Response Time Comparison")
+            response_times = [r.get('response_time', 0) for r in comparison_results]
+            models = [r['display_name'].split(' (')[0] for r in comparison_results]
+            
+            fig_time = go.Figure(data=[
+                go.Bar(
+                    x=models,
+                    y=response_times,
+                    marker_color=['#00FF87', '#04F5FF', '#E90052'],
+                    text=[f"{t:.2f}s" for t in response_times],
+                    textposition='outside'
+                )
+            ])
+            fig_time.update_layout(
+                yaxis_title="Seconds",
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                font=dict(color='white'),
+                height=350
+            )
+            st.plotly_chart(fig_time, use_container_width=True)
+        
+        with col2:
+            # Token Usage Chart
+            st.subheader("Token Usage Comparison")
+            prompt_tokens = [r.get('prompt_tokens', 0) for r in comparison_results]
+            completion_tokens = [r.get('completion_tokens', 0) for r in comparison_results]
+            
+            fig_tokens = go.Figure(data=[
+                go.Bar(name='Prompt', x=models, y=prompt_tokens, marker_color='#00FF87'),
+                go.Bar(name='Completion', x=models, y=completion_tokens, marker_color='#E90052')
+            ])
+            fig_tokens.update_layout(
+                barmode='stack',
+                yaxis_title="Tokens",
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                font=dict(color='white'),
+                height=350,
+                legend=dict(orientation='h', yanchor='bottom', y=1.02)
+            )
+            st.plotly_chart(fig_tokens, use_container_width=True)
+    
+    with tab2:
+        st.subheader("Qualitative Comparison - Side by Side Answers")
+        
+        # Create columns for each model
+        cols = st.columns(len(comparison_results))
+        
+        for idx, (col, result) in enumerate(zip(cols, comparison_results)):
+            with col:
+                st.markdown(f"**{result['display_name']}**")
+                if result.get('success'):
+                    st.success(result['answer'])
+                else:
+                    st.error(f"Failed: {result.get('error', 'Unknown')}")
+                st.caption(f"⏱️ {result.get('response_time', 0):.2f}s | 🔢 {result.get('token_count', 0)} tokens")
+    
+    with tab3:
+        st.subheader("Export Comparison Results")
+        
+        # Prepare export data
+        export_data = []
+        for r in comparison_results:
+            export_data.append({
+                'Question': question,
+                'Model': r['display_name'],
+                'Model Key': r['model_key'],
+                'Success': r.get('success', False),
+                'Response Time (s)': r.get('response_time', 0),
+                'Prompt Tokens': r.get('prompt_tokens', 0),
+                'Completion Tokens': r.get('completion_tokens', 0),
+                'Total Tokens': r.get('token_count', 0),
+                'Answer': r.get('answer', ''),
+                'Error': r.get('error', '')
+            })
+        
+        export_df = pd.DataFrame(export_data)
+        
+        # CSV download button
+        csv = export_df.to_csv(index=False)
+        st.download_button(
+            label="📥 Download CSV",
+            data=csv,
+            file_name=f"model_comparison_{int(time.time())}.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+        
+        # Show preview
+        with st.expander("Preview Export Data"):
+            st.dataframe(export_df, use_container_width=True)
+    
+    # Add to history
+    elapsed_time = time.time() - start_time
+    st.session_state.history.append({
+        'question': question,
+        'answer': f"Comparison: {len([r for r in comparison_results if r.get('success')])} models succeeded",
+        'model': 'COMPARISON',
+        'method': retrieval_method,
+        'time': elapsed_time,
+        'provider': 'openrouter'
+    })
+
+
 def process_question(question: str, model_name: str, retrieval_method: str, 
-                    players: List[str], teams: List[str], hf_token: str):
+                    players: List[str], teams: List[str], hf_token: str,
+                    use_openrouter: bool = False, openrouter_key: str = None,
+                    compare_models: bool = False):
     """Process a user question through the RAG pipeline."""
     
     start_time = time.time()
@@ -842,7 +1266,6 @@ def process_question(question: str, model_name: str, retrieval_method: str,
     with st.spinner("Extracting entities..."):
         entities = extract_entities(question, players, teams)
     
-    # Display intent and entities
     # Display intent and entities
     col1, col2 = st.columns(2)
     with col1:
@@ -878,12 +1301,23 @@ def process_question(question: str, model_name: str, retrieval_method: str,
             # Only baseline
             from graph_retrieval import run_baseline_retrieval
             baseline_result = run_baseline_retrieval(intent, entities)
+            baseline_players = baseline_result.get("players", [])
+            baseline_fixtures = baseline_result.get("fixtures", [])
+            baseline_teams = baseline_result.get("teams", [])
             hybrid_results = {
-                "baseline_players": baseline_result.get("players", []),
+                "baseline_players": baseline_players,
+                "baseline_fixtures": baseline_fixtures,
+                "baseline_teams": baseline_teams,
                 "embedding_players": [],
-                "summary": {"baseline_player_count": len(baseline_result.get("players", [])), "embedding_player_count": 0},
-                "baseline_result": baseline_result, # Store full result for metadata
-                "cypher_query": baseline_result.get("cypher_query") # Direct access
+                "summary": {
+                    "baseline_player_count": len(baseline_players), 
+                    "baseline_fixture_count": len(baseline_fixtures),
+                    "baseline_team_count": len(baseline_teams),
+                    "embedding_player_count": 0
+                },
+                "baseline_result": baseline_result,
+                "baseline_context": baseline_result,
+                "cypher_query": baseline_result.get("cypher_query")
             }
         elif retrieval_method == "embeddings":
             # Only embeddings
@@ -891,71 +1325,128 @@ def process_question(question: str, model_name: str, retrieval_method: str,
             embedding_result = run_embedding_retrieval(query_embedding, entities)
             hybrid_results = {
                 "baseline_players": [],
+                "baseline_fixtures": [],
+                "baseline_teams": [],
                 "embedding_players": embedding_result.get("players", []),
-                "summary": {"baseline_player_count": 0, "embedding_player_count": len(embedding_result.get("players", []))},
+                "summary": {
+                    "baseline_player_count": 0, 
+                    "baseline_fixture_count": 0,
+                    "baseline_team_count": 0,
+                    "embedding_player_count": len(embedding_result.get("players", []))
+                },
                 "cypher_query": "No Cypher query used (Embeddings Mode)"
             }
         else:
             # Hybrid
+            # Get selected embedding index from session state
+            embedding_index = st.session_state.get("embedding_index", "player_embedding_index_minilm")
             hybrid_results = retrieve_hybrid(
                 intent=intent,
                 entities=entities,
                 query_embedding=query_embedding,
-                index_name="player_embedding_index_minilm",
+                index_name=embedding_index,
                 top_k=10
             )
     
-    # Step 4: Generate LLM Answer (MOVED TO TOP)
-    st.header("💬 LLM Answer")
-    with st.spinner(f"Generating answer with {model_name.upper()}..."):
-        try:
-            # Display retrieval statistics small
-            summary = hybrid_results.get("summary", {})
-            st.caption(f"Context: {summary.get('baseline_player_count', 0)} baseline items + {summary.get('embedding_player_count', 0)} embedding items")
-            
-            result = generate_fpl_answer(
-                question=question,
-                hybrid_results=hybrid_results,
-                model_name=model_name,
-                hf_token=hf_token
-            )
-            
-            if result.get('success'):
-                # Big answer box
-                st.success(result['answer'])
+    # Check if comparison mode is enabled
+    if compare_models and openrouter_key:
+        # Run comparison across all OpenRouter models
+        display_model_comparison(question, hybrid_results, openrouter_key, retrieval_method, start_time)
+    else:
+        # Single model answer generation
+        st.header("📺 Match Analysis")
+        with st.spinner(f"Generating answer with {model_name.upper()}..."):
+            try:
+                # Display retrieval statistics - include all types
+                summary = hybrid_results.get("summary", {})
+                player_count = summary.get('baseline_player_count', 0) + summary.get('embedding_player_count', 0)
+                fixture_count = summary.get('baseline_fixture_count', 0)
+                team_count = summary.get('baseline_team_count', 0)
                 
-                # Response metadata
-                elapsed_time = time.time() - start_time
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("Response Time", f"{elapsed_time:.2f}s")
-                with col2:
-                    st.metric("Model", model_name.upper())
-                with col3:
-                    st.metric("Tokens", result.get('token_count', 'N/A'))
+                context_parts = []
+                if player_count > 0:
+                    context_parts.append(f"{player_count} players")
+                if fixture_count > 0:
+                    context_parts.append(f"{fixture_count} fixtures")
+                if team_count > 0:
+                    context_parts.append(f"{team_count} teams")
                 
-                # Add to history
-                st.session_state.history.append({
-                    'question': question,
-                    'answer': result['answer'],
-                    'model': model_name,
-                    'method': retrieval_method,
-                    'time': elapsed_time
-                })
-            else:
-                st.error(f"❌ Error generating answer: {result.get('error', 'Unknown error')}")
-        
-        except Exception as e:
-            st.error(f"❌ Error: {e}")
-            import traceback
-            with st.expander("View error details"):
-                st.code(traceback.format_exc())
+                context_str = ", ".join(context_parts) if context_parts else "0 items"
+                st.caption(f"Context: {context_str}")
+                
+                if use_openrouter:
+                    if not openrouter_key:
+                        st.error("❌ OpenRouter API key not found. Please create openrouter_config.txt")
+                        return
+                    result = generate_openrouter_answer(
+                        question=question,
+                        hybrid_results=hybrid_results,
+                        model_name=model_name,
+                        api_key=openrouter_key
+                    )
+                else:
+                    if not hf_token:
+                        st.error("❌ HuggingFace token not found. Please create hf.txt")
+                        return
+                    result = generate_fpl_answer(
+                        question=question,
+                        hybrid_results=hybrid_results,
+                        model_name=model_name,
+                        hf_token=hf_token
+                    )
+                
+                if result.get('success'):
+                    # Big answer box
+                    st.success(result['answer'])
+                    
+                    # Response metadata
+                    elapsed_time = time.time() - start_time
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Response Time", f"{result.get('response_time', elapsed_time):.2f}s")
+                    with col2:
+                        st.metric("Model", model_name.upper())
+                    with col3:
+                        st.metric("Total Tokens", result.get('token_count', 'N/A'))
+                    with col4:
+                        provider = "OpenRouter" if use_openrouter else "HuggingFace"
+                        st.metric("Provider", provider)
+                    
+                    # Show detailed token breakdown for OpenRouter
+                    if use_openrouter and result.get('prompt_tokens'):
+                        with st.expander("📊 Token Details"):
+                            token_col1, token_col2, token_col3 = st.columns(3)
+                            with token_col1:
+                                st.metric("Prompt Tokens", result.get('prompt_tokens', 0))
+                            with token_col2:
+                                st.metric("Completion Tokens", result.get('completion_tokens', 0))
+                            with token_col3:
+                                st.metric("Total Tokens", result.get('token_count', 0))
+                    
+                    # Add to history
+                    st.session_state.history.append({
+                        'question': question,
+                        'answer': result['answer'],
+                        'model': model_name,
+                        'method': retrieval_method,
+                        'time': elapsed_time,
+                        'provider': 'openrouter' if use_openrouter else 'huggingface'
+                    })
+                else:
+                    st.error(f"❌ Error generating answer: {result.get('error', 'Unknown error')}")
+            
+            except Exception as e:
+                st.error(f"❌ Error: {e}")
+                import traceback
+                with st.expander("View error details"):
+                    st.code(traceback.format_exc())
 
     # Step 5: Knowledge Graph Context (MOVED DOWN)
-    st.header("📊 Knowledge Graph Context")
+    st.header("🎯 Tactical Breakdown")
     
     baseline_players = hybrid_results.get("baseline_players", [])
     embedding_players = hybrid_results.get("embedding_players", [])
+    baseline_fixtures = hybrid_results.get("baseline_fixtures", [])
     
     # Tabs for different views
     tab1, tab2, tab3 = st.tabs(["Combined View", "Baseline Results", "Embedding Results"])
@@ -1022,6 +1513,18 @@ def process_question(question: str, model_name: str, retrieval_method: str,
                 column_config=column_config,
                 hide_index=True
             )
+        elif baseline_fixtures:
+            # Display fixtures if no players but fixtures exist
+            st.subheader("📅 Fixtures")
+            fixture_data = []
+            for f in baseline_fixtures:
+                fixture_data.append({
+                    "GW": f.get("gw", "N/A"),
+                    "Home": f.get("home_team", "N/A"),
+                    "Away": f.get("away_team", "N/A"),
+                    "Kickoff": f.get("kickoff", "N/A")
+                })
+            st.dataframe(pd.DataFrame(fixture_data), use_container_width=True, hide_index=True)
         else:
             st.info("No players retrieved")
     
@@ -1059,7 +1562,7 @@ def process_question(question: str, model_name: str, retrieval_method: str,
             st.info("Cypher query details not available in current retrieval mode")
     
     # Step 7: Graph visualization
-    st.header("🕸️ Knowledge Graph Visualization")
+    st.header("⚽ Formation View")
     try:
         G = create_knowledge_graph(hybrid_results)
         if len(G.nodes()) > 0:

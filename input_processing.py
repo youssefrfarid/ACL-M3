@@ -233,13 +233,13 @@ def extract_budget(question: str) -> Optional[float]:
 
 def extract_position(question: str) -> Optional[str]:
     q = question.lower()
-    if any(w in q for w in ["goalkeeper", "keeper", "gk"]):
+    if any(w in q for w in ["goalkeeper", "goalkeepers", "keeper", "keepers", "gk"]):
         return "GK"
-    if any(w in q for w in ["defender", "def"]):
+    if any(w in q for w in ["defender", "defenders", "def", "defense", "defence", "defensive"]):
         return "DEF"
-    if any(w in q for w in ["midfielder", "mid"]):
+    if any(w in q for w in ["midfielder", "midfielders", "mid", "midfield"]):
         return "MID"
-    if any(w in q for w in ["forward", "striker", "fwd"]):
+    if any(w in q for w in ["forward", "forwards", "striker", "strikers", "fwd", "attack", "attacker", "attackers"]):
         return "FWD"
     return None
 

@@ -5,10 +5,13 @@ This module provides:
 1. Context combination (baseline + embedding results)
 2. Structured prompt construction (context + persona + task)
 3. Multi-model LLM interface for answer generation
+4. OpenRouter API integration for additional models
 """
 
 from typing import Dict, Any, List, Optional
 from huggingface_hub import InferenceClient
+import requests
+import json
 import time
 
 
@@ -62,35 +65,63 @@ def combine_contexts(hybrid_results: Dict[str, Any]) -> str:
         context_parts.append("=== PLAYERS ===")
         for idx, (name, info) in enumerate(list(all_players.items())[:10], 1):
             data = info["data"]
-            player_str = f"{idx}. {name}"
             
-            # Add available stats
-            if "position" in data:
-                player_str += f" ({data['position']})"
-            if "team" in data and data["team"]:
-                player_str += f" - {data['team']}"
-            if "total_points" in data:
-                player_str += f"\n   Points: {data['total_points']}"
-            if "goals" in data:
-                player_str += f", Goals: {data['goals']}"
-            # Reorder specific stats to front for LLM visibility
+            # Build stats parts - check all possible field names
             parts = []
-            if "total_points" in data:
-                parts.append(f"Points: {data['total_points']}")
-            if "price" in data:
-                parts.append(f"Price: £{data['price']:.1f}m")
-            if "goals_scored" in data:
-                parts.append(f"Scored: {data['goals_scored']}")
-            if "clean_sheets" in data:
-                parts.append(f"Clean Sheets: {data['clean_sheets']}")
-            if "goals_conceded" in data:
-                parts.append(f"Conceded: {data['goals_conceded']}")
-            if "form" in data and data["form"]:
-                parts.append(f"Form: {data['form']:.1f}")
             
-            # Combine
+            # Points (check multiple possible keys)
+            points = data.get('total_points') or data.get('points') or data.get('value')
+            if points is not None:
+                parts.append(f"Points: {points}")
+            
+            # Position
+            position = data.get('position', '')
+            
+            # Team
+            team = data.get('team', '')
+            
+            # Price
+            if "price" in data and data["price"]:
+                try:
+                    parts.append(f"Price: £{float(data['price']):.1f}m")
+                except:
+                    parts.append(f"Price: {data['price']}")
+            
+            # Goals (check multiple keys)
+            goals = data.get('goals_scored') or data.get('goals')
+            if goals is not None:
+                parts.append(f"Goals: {goals}")
+            
+            # Assists
+            if "assists" in data and data["assists"]:
+                parts.append(f"Assists: {data['assists']}")
+            
+            # Clean sheets
+            if "clean_sheets" in data and data["clean_sheets"]:
+                parts.append(f"Clean Sheets: {data['clean_sheets']}")
+            
+            # Goals conceded
+            if "goals_conceded" in data and data["goals_conceded"]:
+                parts.append(f"Conceded: {data['goals_conceded']}")
+            
+            # Form
+            if "form" in data and data["form"]:
+                try:
+                    parts.append(f"Form: {float(data['form']):.1f}")
+                except:
+                    parts.append(f"Form: {data['form']}")
+            
+            # Build the player string
+            player_str = f"{idx}. {name}"
+            if position:
+                player_str += f" ({position})"
+            if team:
+                player_str += f" - {team}"
+            
+            # Add stats
             stats_str = ", ".join(parts)
-            player_str += f" - {stats_str}"
+            if stats_str:
+                player_str += f"\n   {stats_str}"
             
             if "score" in data:  # Embedding similarity
                 player_str += f"\n   Similarity: {data['score']:.3f}"
@@ -264,6 +295,176 @@ class FPLLLMInterface:
             }
 
 
+# =====================  OPENROUTER LLM INTERFACE  =====================
+
+def load_openrouter_key(filepath: str = "openrouter_config.txt") -> Optional[str]:
+    """Load OpenRouter API key from file."""
+    try:
+        with open(filepath, 'r') as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return None
+
+
+class OpenRouterLLMInterface:
+    """
+    Interface for LLM models via OpenRouter API.
+    Supports multiple free models for comparison.
+    """
+    
+    # OpenRouter models (free tier)
+    MODELS = {
+        "qwen3-coder": "qwen/qwen3-coder:free",
+        "llama-3.3-70b": "meta-llama/llama-3.3-70b-instruct:free",
+        "gemini-flash": "google/gemini-2.0-flash-exp:free",
+    }
+    
+    # Display names for UI
+    MODEL_DISPLAY_NAMES = {
+        "qwen3-coder": "Qwen3 Coder (Fast)",
+        "llama-3.3-70b": "Llama 3.3 70B (Large)",
+        "gemini-flash": "Gemini 2.0 Flash (Balanced)",
+    }
+    
+    API_URL = "https://openrouter.ai/api/v1/chat/completions"
+    
+    def __init__(self, model_name: str, api_key: str):
+        """
+        Initialize OpenRouter LLM interface.
+        
+        Args:
+            model_name: One of "qwen3-coder", "gpt-oss-120b", "gemini-flash" or full model path
+            api_key: OpenRouter API key
+        """
+        # Resolve model name
+        if model_name in self.MODELS:
+            self.model_id = self.MODELS[model_name]
+            self.model_key = model_name
+        else:
+            self.model_id = model_name
+            self.model_key = model_name
+        
+        self.api_key = api_key
+        self.headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/fpl-rag-system",
+            "X-Title": "FPL RAG Chatbot"
+        }
+        print(f"Initialized OpenRouter LLM: {self.model_id}")
+    
+    def generate_answer(
+        self, 
+        prompt: str, 
+        max_tokens: int = 500,
+        temperature: float = 0.3,
+        max_retries: int = 5
+    ) -> Dict[str, Any]:
+        """
+        Generate answer from prompt using OpenRouter API.
+        
+        Args:
+            prompt: Complete prompt with context
+            max_tokens: Maximum response length
+            temperature: Sampling temperature (lower = more deterministic)
+            max_retries: Maximum number of retries for rate limiting (default 5)
+        
+        Returns:
+            Dict with:
+                - answer: Generated text
+                - response_time: Time taken (seconds)
+                - token_count: Total tokens used
+                - prompt_tokens: Tokens in prompt
+                - completion_tokens: Tokens in response
+                - model: Model name
+        """
+        start_time = time.time()
+        
+        payload = {
+            "model": self.model_id,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    self.API_URL,
+                    headers=self.headers,
+                    data=json.dumps(payload),
+                    timeout=120
+                )
+                
+                response_time = time.time() - start_time
+                
+                # Handle rate limiting with retry
+                if response.status_code == 429:
+                    wait_time = min(2 ** attempt, 10)  # Exponential backoff: 1s, 2s, 4s, 8s, 10s max
+                    print(f"⏳ Rate limited (429). Waiting {wait_time}s before retry {attempt + 1}/{max_retries}...")
+                    last_error = f"Rate limited - exhausted {max_retries} retries"
+                    time.sleep(wait_time)
+                    continue
+                
+                if response.status_code != 200:
+                    error_msg = f"API error {response.status_code}: {response.text}"
+                    return {
+                        "answer": error_msg,
+                        "response_time": response_time,
+                        "token_count": 0,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "model": self.model_key,
+                        "success": False,
+                        "error": error_msg
+                    }
+                
+                result = response.json()
+                
+                # Extract answer
+                answer = result["choices"][0]["message"]["content"]
+                
+                # Extract token usage (OpenRouter provides this)
+                usage = result.get("usage", {})
+                prompt_tokens = usage.get("prompt_tokens", 0)
+                completion_tokens = usage.get("completion_tokens", 0)
+                total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
+                
+                return {
+                    "answer": answer,
+                    "response_time": response_time,
+                    "token_count": total_tokens,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "model": self.model_key,
+                    "success": True,
+                    "error": None
+                }
+            
+            except requests.exceptions.Timeout:
+                last_error = "Request timed out after 120 seconds"
+                continue
+            
+            except Exception as e:
+                last_error = str(e)
+                continue
+        
+        # If we exhausted all retries
+        response_time = time.time() - start_time
+        return {
+            "answer": f"Failed after {max_retries} retries: {last_error}",
+            "response_time": response_time,
+            "token_count": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "model": self.model_key,
+            "success": False,
+            "error": last_error
+        }
+
+
 # =====================  END-TO-END PIPELINE  =====================
 
 def generate_fpl_answer(
@@ -304,6 +505,48 @@ def generate_fpl_answer(
     # Add context for transparency
     result["context"] = context
     result["prompt_length"] = len(prompt)
+    
+    return result
+
+
+def generate_openrouter_answer(
+    question: str,
+    hybrid_results: Dict[str, Any],
+    model_name: str = "gemini-flash",
+    api_key: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Complete pipeline using OpenRouter: combine context, build prompt, generate answer.
+    
+    Args:
+        question: User's question
+        hybrid_results: Output from retrieve_hybrid()
+        model_name: OpenRouter model to use ("qwen3-coder", "gpt-oss-120b", "gemini-flash")
+        api_key: OpenRouter API key (if None, loads from file)
+    
+    Returns:
+        Dict with answer, metadata, and context
+    """
+    # Load API key if not provided
+    if not api_key:
+        api_key = load_openrouter_key()
+        if not api_key:
+            raise ValueError("OpenRouter API key required. Create openrouter_config.txt or pass key.")
+    
+    # Step 1: Combine contexts
+    context = combine_contexts(hybrid_results)
+    
+    # Step 2: Build prompt
+    prompt = build_fpl_prompt(question, context)
+    
+    # Step 3: Generate answer
+    llm = OpenRouterLLMInterface(model_name, api_key)
+    result = llm.generate_answer(prompt)
+    
+    # Add context for transparency
+    result["context"] = context
+    result["prompt_length"] = len(prompt)
+    result["provider"] = "openrouter"
     
     return result
 
