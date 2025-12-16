@@ -1,52 +1,46 @@
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Tuple
+from typing import Optional, List, Tuple
 import re
 
 from neo4j import GraphDatabase
-# NOTE: SentenceTransformer import moved to get_embedding_model() to avoid M1 lock issues
 
 
 # =====================  CONFIG / NEO4J CONNECTION  =====================
 
 def read_config(config_file: str = "config.txt") -> dict:
-    """
-    Load Neo4j credentials from config.txt.
-    Expected format:
-        URI=neo4j+s://...databases.neo4j.io  (for Aura)
-        USERNAME=neo4j
-        PASSWORD=your_password
-    """
     config = {}
-    try:
-        with open(config_file, "r") as f:
-            for line in f:
-                if "=" in line:
-                    key, value = line.strip().split("=", 1)
-                    config[key.strip()] = value.strip()
-    except FileNotFoundError:
-        raise FileNotFoundError(
-            "config.txt not found. Make sure it exists in the same folder as this script."
-        )
+    with open(config_file, "r") as f:
+        for line in f:
+            if "=" in line:
+                k, v = line.strip().split("=", 1)
+                config[k.strip()] = v.strip()
     return config
 
 
 def get_driver():
     cfg = read_config()
-    uri = cfg.get("URI", "neo4j://localhost:7687")
-    user = cfg.get("USERNAME", "neo4j")
-    password = cfg.get("PASSWORD", "neo4j")
-    # For Aura, uri should be like neo4j+s://....databases.neo4j.io
-    return GraphDatabase.driver(uri, auth=(user, password))
+    return GraphDatabase.driver(
+        cfg.get("URI", "neo4j://localhost:7687"),
+        auth=(cfg.get("USERNAME", "neo4j"), cfg.get("PASSWORD", "neo4j")),
+    )
 
 
 # =====================  INTENT LABELS  =====================
 
-INTENT_PLAYER_INFO = "player_info"               # single player stats/info
-INTENT_COMPARE_PLAYERS = "compare_players"       # compare 2+ players
-INTENT_FIXTURE_INFO = "fixture_info"             # fixtures, schedule
+INTENT_PLAYER_INFO = "player_info"
+INTENT_COMPARE_PLAYERS = "compare_players"
+INTENT_FIXTURE_INFO = "fixture_info"
 INTENT_PLAYER_RECOMMEND = "player_recommendation"
 INTENT_TEAM_RECOMMEND = "team_recommendation"
-INTENT_GENERAL_QUESTION = "general_question"     # fallback / generic
+INTENT_GENERAL_QUESTION = "general_question"
+
+
+# Semantic intents → NEED embeddings
+SEMANTIC_INTENTS = {
+    INTENT_COMPARE_PLAYERS,
+    INTENT_PLAYER_RECOMMEND,
+    INTENT_TEAM_RECOMMEND,
+}
 
 
 # =====================  ENTITY DATA CLASS  =====================
@@ -55,17 +49,17 @@ INTENT_GENERAL_QUESTION = "general_question"     # fallback / generic
 class QueryEntities:
     player_names: List[str] = field(default_factory=list)
     team_names: List[str] = field(default_factory=list)
-    position: Optional[str] = None          # "GK", "DEF", "MID", "FWD"
+    position: Optional[str] = None
     gameweek: Optional[int] = None
-    horizon_gw: Optional[int] = None        # "next 3 gameweeks"
+    horizon_gw: Optional[int] = None
     season: Optional[str] = None
-    budget: Optional[float] = None          # e.g. 8.0
-    stat_name: Optional[str] = None         # "points", "goals", etc.
+    budget: Optional[float] = None
+    stat_name: Optional[str] = None
 
-    def to_dict(self) -> Dict:
+    def to_dict(self):
         return {
-            "player_names": self.player_names or [],
-            "team_names": self.team_names or [],
+            "player_names": self.player_names,
+            "team_names": self.team_names,
             "position": self.position,
             "gameweek": self.gameweek,
             "horizon_gw": self.horizon_gw,
@@ -75,21 +69,14 @@ class QueryEntities:
         }
 
 
-# =====================  EMBEDDING MODEL  =====================
+# =====================  INPUT EMBEDDING (QUERY EMBEDDING)  =====================
 
 EMBEDDING_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
-_embedding_model = None  # Lazy-loaded to avoid M1 lock issues
-USE_CLOUD_EMBEDDINGS = True  # Set to False to use local model (may cause M1 issues)
+USE_CLOUD_EMBEDDINGS = True
+_embedding_model = None
 
 
-def load_hf_token(token_file: str = "hf.txt") -> Optional[str]:
-    """
-    Load HuggingFace API token from file.
-    Required for cloud-based embeddings (M1 Mac compatible).
-    
-    Returns:
-        Token string if found, None otherwise
-    """
+def load_hf_token(token_file="hf.txt"):
     try:
         with open(token_file, "r") as f:
             return f.read().strip()
@@ -97,225 +84,125 @@ def load_hf_token(token_file: str = "hf.txt") -> Optional[str]:
         return None
 
 
-def get_embedding_model():
+def get_query_embedding_cloud(text: str, token: str):
     """
-    Lazy-load the sentence-transformers model once and reuse it.
-    WARNING: May cause OpenMP lock issues on M1 Macs.
-    Consider using USE_CLOUD_EMBEDDINGS=True instead.
-    """
-    global _embedding_model
-    if _embedding_model is None:
-        # Import only when needed to avoid M1 lock issues
-        from sentence_transformers import SentenceTransformer
-        _embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
-    return _embedding_model
-
-
-def get_query_embedding_cloud(question: str, hf_token: str) -> List[float]:
-    """
-    Compute embedding using HuggingFace Inference API (cloud-based).
-    M1 Mac compatible - avoids OpenMP mutex lock issues.
-    
-    Args:
-        question: Text to embed
-        hf_token: HuggingFace API token
-        
-    Returns:
-        Embedding vector as list of floats
+    Converts the USER QUESTION into a fixed 384-dimensional vector
+    using HuggingFace cloud inference.
     """
     from huggingface_hub import InferenceClient
     import numpy as np
-    
-    client = InferenceClient(token=hf_token)
-    response = client.feature_extraction(
-        question,
-        model=EMBEDDING_MODEL_NAME
-    )
-    embedding = np.array(response)
-    
-    # Handle 2D output (average pooling)
-    if len(embedding.shape) == 2:
-        embedding = np.mean(embedding, axis=0)
-    
-    # Normalize
-    embedding = embedding / np.linalg.norm(embedding)
-    
-    return embedding.tolist()
+
+    client = InferenceClient(token=token)
+    emb = client.feature_extraction(text, model=EMBEDDING_MODEL_NAME)
+    emb = np.array(emb)
+
+    # Average pooling if token-level output
+    if emb.ndim == 2:
+        emb = emb.mean(axis=0)
+
+    # Normalize for cosine similarity
+    emb = emb / np.linalg.norm(emb)
+    return emb.tolist()
 
 
-def get_query_embedding(question: str) -> List[float]:
+def get_query_embedding(text: str):
     """
-    Compute an embedding vector for the user question.
-    This will be used later for embedding-based retrieval in Neo4j.
-    
-    Automatically uses cloud API if USE_CLOUD_EMBEDDINGS=True (recommended for M1).
+    Generates an embedding for the USER QUERY.
+    Called ONLY for semantic intents.
+    Safe: never crashes preprocessing.
     """
-    if USE_CLOUD_EMBEDDINGS:
-        hf_token = load_hf_token()
-        if hf_token:
-            return get_query_embedding_cloud(question, hf_token)
-        else:
-            print("WARNING: Cloud embeddings enabled but hf.txt not found.")
-            print("Falling back to local model (may cause M1 issues).")
-            print("Create hf.txt with your HuggingFace token to use cloud mode.")
-    
-    # Fallback to local model
-    model = get_embedding_model()
-    emb = model.encode(question, normalize_embeddings=True)  # numpy array
-    return emb.tolist()  # convert to Python list (easier to store/send)
+    try:
+        if USE_CLOUD_EMBEDDINGS:
+            token = load_hf_token()
+            if token:
+                return get_query_embedding_cloud(text, token)
+
+        # Fallback: local model
+        from sentence_transformers import SentenceTransformer
+        global _embedding_model
+        if _embedding_model is None:
+            _embedding_model = SentenceTransformer(EMBEDDING_MODEL_NAME)
+
+        return _embedding_model.encode(text, normalize_embeddings=True).tolist()
+
+    except Exception as e:
+        print("⚠️ Embedding failed, continuing without embedding.")
+        print("Reason:", e)
+        return None
 
 
 # =====================  INTENT CLASSIFIER  =====================
 
 def classify_intent(question: str) -> str:
-    """
-    Very simple rule-based intent classifier for FPL queries.
-    You can improve this later (LLM, more rules, etc.).
-    """
     q = question.lower()
 
-    # 1) Compare players
     if " vs " in q or " versus " in q or "compare" in q:
         return INTENT_COMPARE_PLAYERS
 
-    # 2) Recommendations
-    if "recommend" in q or "suggest" in q or "who should i buy" in q:
-        if "team" in q or "squad" in q or "wildcard" in q:
+    if "recommend" in q or "suggest" in q:
+        if "team" in q or "squad" in q:
             return INTENT_TEAM_RECOMMEND
         return INTENT_PLAYER_RECOMMEND
 
-    # 3) Fixtures
-    if "fixture" in q or "fixtures" in q or ("who do" in q and "play" in q):
+    if "fixture" in q or ("who do" in q and "play" in q):
         return INTENT_FIXTURE_INFO
-    
-    # 4) Team queries (best teams, top teams, etc.)
-    if ("team" in q or "teams" in q) and not any(word in q for word in ["player", "players"]):
-        if any(word in q for word in ["best", "top", "good", "strong", "weak", "defence", "defense", "attack"]):
-            return INTENT_TEAM_RECOMMEND
 
-    # 5) Player stats/info
-    stats_keywords = ["points", "stats", "goals", "assists", "xg", "xa", "form"]
-    if any(word in q for word in stats_keywords):
+    if any(w in q for w in ["points", "goals", "assists", "xg", "xa", "form"]):
         return INTENT_PLAYER_INFO
 
-    # 6) Fallback
     return INTENT_GENERAL_QUESTION
 
 
 # =====================  ENTITY HELPERS  =====================
 
-def extract_gameweek(question: str) -> Optional[int]:
-    q = question.lower()
-    # matches: "gw5", "gw 5", "gameweek 5"
-    m = re.search(r"(gw|gameweek)\s*(\d+)", q)
-    if m:
-        return int(m.group(2))
-    return None
+def extract_gameweek(q: str):
+    m = re.search(r"(gw|gameweek)\s*(\d+)", q.lower())
+    return int(m.group(2)) if m else None
 
 
-def extract_horizon_gw(question: str) -> Optional[int]:
-    q = question.lower()
-    # matches: "next 3 gameweeks", "next 2 gws", "next 4 weeks"
-    m = re.search(r"next\s+(\d+)\s+(gameweeks|gws|weeks)", q)
-    if m:
-        return int(m.group(1))
-    return None
+def extract_horizon_gw(q: str):
+    m = re.search(r"next\s+(\d+)\s+(gameweeks|gws|weeks)", q.lower())
+    return int(m.group(1)) if m else None
 
 
-def extract_budget(question: str) -> Optional[float]:
-    q = question.lower()
-    # matches: "under 8.0", "below 7.5m", "for 6.5"
-    m = re.search(r"(under|below|less than|for)\s+(\d+(\.\d+)?)", q)
-    if m:
-        return float(m.group(2))
-    return None
+def extract_budget(q: str):
+    m = re.search(r"(under|below|less than|for)\s+£?(\d+(\.\d+)?)", q.lower())
+    return float(m.group(2)) if m else None
 
 
-def extract_position(question: str) -> Optional[str]:
-    q = question.lower()
-    if any(w in q for w in ["goalkeeper", "keeper", "gk"]):
+def extract_position(q: str):
+    q = q.lower()
+    if "gk" in q or "goalkeeper" in q:
         return "GK"
-    if any(w in q for w in ["defender", "def"]):
+    if "def" in q or "defender" in q:
         return "DEF"
-    if any(w in q for w in ["midfielder", "mid"]):
+    if "mid" in q or "midfielder" in q:
         return "MID"
-    if any(w in q for w in ["forward", "striker", "fwd"]):
+    if "fwd" in q or "forward" in q or "striker" in q:
         return "FWD"
     return None
 
 
-def extract_stat_name(question: str) -> Optional[str]:
-    q = question.lower()
-    if "points" in q:
-        return "points"
-    if "goals" in q:
-        return "goals"
-    if "assists" in q:
-        return "assists"
-    if "xg" in q:
-        return "xg"
-    if "xa" in q:
-        return "xa"
-    if "clean sheet" in q or "clean sheets" in q:
-        return "clean_sheets"
+def extract_stat_name(q: str):
+    q = q.lower()
+    for stat in ["points", "goals", "assists", "xg", "xa", "clean sheets"]:
+        if stat in q:
+            return stat.replace(" ", "_")
     return None
 
 
-def extract_season(question: str) -> Optional[str]:
-    """
-    Extract season from question.
-    Matches patterns like:
-    - "2022-23", "2023-24"
-    - "2022/23", "2023/24"
-    - "2022/2023"
-    - "season 2022-23"
-    """
-    q = question.lower()
-    
-    # Pattern 1: YYYY/YYYY (e.g., "2022/2023") - CHECK THIS FIRST!
+def extract_season(q: str):
     m = re.search(r"(\d{4})/(\d{4})", q)
     if m:
-        year1 = m.group(1)
-        year2 = m.group(2)
-        # Convert to short format: 2022/2023 -> 2022-23
-        return f"{year1}-{year2[-2:]}"
-    
-    # Pattern 2: YYYY-YY or YYYY/YY (e.g., "2022-23", "2022/23")
+        return f"{m.group(1)}-{m.group(2)[-2:]}"
     m = re.search(r"(\d{4})[-/](\d{2})", q)
-    if m:
-        year1 = m.group(1)
-        year2 = m.group(2)
-        return f"{year1}-{year2}"
-    
-    return None
+    return f"{m.group(1)}-{m.group(2)}" if m else None
 
 
-# =====================  LOAD DATA FROM YOUR GRAPH  =====================
+# =====================  ENTITY EXTRACTION (ROBUST)  =====================
 
-def load_known_players_and_teams() -> Tuple[List[str], List[str]]:
-    """
-    Reads distinct player and team names from YOUR Neo4j FPL graph.
-
-    Assumes:
-      - Player nodes: (:Player {player_name, player_element})
-      - Team nodes:   (:Team {name})
-    Adjust the Cypher if your labels/props differ.
-    """
-    driver = get_driver()
-    players: List[str] = []
-    teams: List[str] = []
-
-    with driver.session() as session:
-        # Players
-        result_p = session.run("MATCH (p:Player) RETURN DISTINCT p.player_name AS name")
-        players = [r["name"] for r in result_p if r["name"]]
-
-        # Teams
-        result_t = session.run("MATCH (t:Team) RETURN DISTINCT t.name AS name")
-        teams = [r["name"] for r in result_t if r["name"]]
-
-    driver.close()
-    return players, teams
+def normalize_text(text: str) -> str:
+    return re.sub(r"[^\w\s]", " ", text.lower())
 
 
 def extract_players_and_teams(
@@ -323,70 +210,73 @@ def extract_players_and_teams(
     known_players: List[str],
     known_teams: List[str],
 ) -> Tuple[List[str], List[str]]:
-    """
-    Simple substring matching:
-    If the full player/team name appears in the question text.
-    """
-    q_low = question.lower()
-    players = [p for p in known_players if p and p.lower() in q_low]
-    teams = [t for t in known_teams if t and t.lower() in q_low]
+
+    q = normalize_text(question)
+    tokens = set(q.split())
+
+    players = []
+    for p in known_players:
+        p_norm = normalize_text(p)
+        last_name = p_norm.split()[-1]
+        if p_norm in q or last_name in tokens:
+            players.append(p)
+
+    teams = []
+    for t in known_teams:
+        if normalize_text(t) in q:
+            teams.append(t)
+
     return list(set(players)), list(set(teams))
 
 
-def extract_entities(
-    question: str,
-    known_players: List[str],
-    known_teams: List[str],
-) -> QueryEntities:
-    """Main entity extraction: calls all helper functions."""
-    gw = extract_gameweek(question)
-    horizon = extract_horizon_gw(question)
-    budget = extract_budget(question)
-    position = extract_position(question)
-    stat_name = extract_stat_name(question)
-    season = extract_season(question)  # Now extracts from question!
-
-    player_names, team_names = extract_players_and_teams(
-        question, known_players, known_teams
-    )
-
+def extract_entities(question: str, players: List[str], teams: List[str]) -> QueryEntities:
+    p, t = extract_players_and_teams(question, players, teams)
     return QueryEntities(
-        player_names=player_names,
-        team_names=team_names,
-        position=position,
-        gameweek=gw,
-        horizon_gw=horizon,
-        season=season,
-        budget=budget,
-        stat_name=stat_name,
+        player_names=p,
+        team_names=t,
+        position=extract_position(question),
+        gameweek=extract_gameweek(question),
+        horizon_gw=extract_horizon_gw(question),
+        season=extract_season(question),
+        budget=extract_budget(question),
+        stat_name=extract_stat_name(question),
     )
 
 
-# =====================  MANUAL TESTING (RUN THIS FILE)  =====================
+# =====================  LOAD GRAPH DATA  =====================
+
+def load_known_players_and_teams():
+    driver = get_driver()
+    with driver.session() as s:
+        players = [r["name"] for r in s.run("MATCH (p:Player) RETURN p.player_name AS name")]
+        teams = [r["name"] for r in s.run("MATCH (t:Team) RETURN t.name AS name")]
+    driver.close()
+    return players, teams
+
+
+# =====================  MANUAL TESTING  =====================
 
 if __name__ == "__main__":
-    print("Connecting to Neo4j and loading players/teams from your FPL graph...")
-    try:
-        players, teams = load_known_players_and_teams()
-    except Exception as e:
-        print("Error loading from Neo4j:", e)
-        print("Make sure:")
-        print("- Neo4j is running (Aura instance online)")
-        print("- config.txt exists and has URI, USERNAME, PASSWORD")
-        raise SystemExit(1)
-
-    print(f"Loaded {len(players)} players and {len(teams)} teams from the graph.")
+    players, teams = load_known_players_and_teams()
+    print(f"Loaded {len(players)} players, {len(teams)} teams")
 
     while True:
-        q = input("\nType an FPL question (or 'exit'): ")
-        if q.lower().strip() == "exit":
+        q = input("\nAsk FPL question (exit to quit): ")
+        if q.lower() == "exit":
             break
 
         intent = classify_intent(q)
         entities = extract_entities(q, players, teams)
-        embedding = get_query_embedding(q)
 
-        print("\nIntent:", intent)
+        print("Intent:", intent)
         print("Entities:", entities.to_dict())
-        print(f"Embedding length: {len(embedding)}")
-        print(f"Embedding (first 5 values): {embedding[:5]}")
+
+        # ✅ Correct embedding logic
+        embedding = None
+        if intent in SEMANTIC_INTENTS:
+            embedding = get_query_embedding(q)
+
+        if embedding:
+            print("Embedding generated (length =", len(embedding), ")")
+        else:
+            print("Embedding not used")

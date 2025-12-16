@@ -323,9 +323,8 @@ def main():
         
         builder.build_graph(data)
         
-        print("You can now access Neo4j Browser at: http://localhost:7474")
-        print("Username: neo4j")
-        print("Password: fplpassword123")
+        print("You can now access Neo4j via the Neo4j Aura Console")
+        print("Use the same credentials from config.txt")
         
     except Exception as e:
         print(f"\nError: {e}")
